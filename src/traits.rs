@@ -1,11 +1,8 @@
-use crate::model::CanonicalMessage;
-use anyhow::anyhow;
-use async_channel::{bounded, Receiver, RecvError};
+use crate::CanonicalMessage;
 use async_trait::async_trait;
 pub use futures::future::BoxFuture;
 use std::any::Any;
 use thiserror::Error;
-use tokio::task::JoinHandle;
 
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum ConsumerError {
@@ -24,7 +21,6 @@ pub trait MessageConsumer: Send + Sync {
     async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)>;
     fn as_any(&self) -> &dyn Any;
 }
-
 
 #[async_trait]
 pub trait MessagePublisher: Send + Sync + 'static {

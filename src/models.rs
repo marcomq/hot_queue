@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// The top-level configuration is a map of named routes.
@@ -6,7 +6,7 @@ use std::collections::HashMap;
 pub type Config = HashMap<String, Route>;
 
 /// Defines a single message processing route from an input to an output.
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Route {
     /// (Optional) Number of concurrent processing tasks for this route. Defaults to 1.
@@ -23,7 +23,7 @@ fn default_concurrency() -> usize {
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     /// (Optional) A list of middlewares to apply to the endpoint.
@@ -38,16 +38,19 @@ pub struct Endpoint {
 /// An enumeration of all supported endpoint types.
 /// `#[serde(rename_all = "lowercase")]` ensures that the keys in the config (e.g., "kafka")
 /// match the enum variants.
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EndpointType {
     Kafka(KafkaEndpoint),
     Nats(NatsEndpoint),
+    File(String),
+    Static(String),
+    Memory(MemoryConfig),
     // Other endpoint types like Amqp, Mongodb can be added here.
 }
 
 /// Configuration for middlewares applied to an endpoint.
-#[derive(Debug, Deserialize, serde::Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Middlewares {
     #[serde(default)]
@@ -60,7 +63,7 @@ pub struct Middlewares {
 }
 
 /// Deduplication middleware configuration.
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeduplicationMiddleware {
     pub sled_path: String,
@@ -69,12 +72,12 @@ pub struct DeduplicationMiddleware {
 
 /// Metrics middleware configuration. It's currently a struct without fields
 /// but can be extended later. Its presence in the config enables the middleware.
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsMiddleware {}
 
 /// Dead-Letter Queue (DLQ) middleware configuration.
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeadLetterQueueMiddleware {
     #[serde(flatten)]
@@ -84,7 +87,7 @@ pub struct DeadLetterQueueMiddleware {
 // --- Kafka Specific Configuration ---
 
 /// Kafka endpoint configuration, combining connection and topic details.
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KafkaEndpoint {
     pub topic: String,
@@ -93,7 +96,7 @@ pub struct KafkaEndpoint {
 }
 
 /// General Kafka connection configuration.
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
     pub brokers: String,
@@ -107,7 +110,7 @@ pub struct KafkaConfig {
 // --- NATS Specific Configuration ---
 
 /// NATS endpoint configuration, combining connection and subject details.
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NatsEndpoint {
     pub subject: String,
@@ -116,7 +119,7 @@ pub struct NatsEndpoint {
 }
 
 /// General NATS connection configuration.
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {
     pub url: String,
@@ -127,10 +130,17 @@ pub struct NatsConfig {
     pub tls: Option<TlsConfig>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryConfig {
+    pub topic: String,
+    pub capacity: Option<usize>,
+}
+
 // --- Common Configuration ---
 
 /// TLS configuration for secure connections.
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     pub required: bool,
@@ -221,8 +231,8 @@ kafka_to_nats:
 
     #[test]
     fn test_deserialize_from_yaml() {
-        let builder = ConfigBuilder::builder()
-            .add_source(File::from_str(TEST_YAML, FileFormat::Yaml));
+        let builder =
+            ConfigBuilder::builder().add_source(File::from_str(TEST_YAML, FileFormat::Yaml));
 
         let config: Config = builder.build().unwrap().try_deserialize().unwrap();
         assert_config_values(&config);
@@ -240,13 +250,19 @@ kafka_to_nats:
                 "my-consumer-group",
             );
             std::env::set_var("HQ__KAFKA_TO_NATS__INPUT__KAFKA__TLS__REQUIRED", "true");
-            std::env::set_var("HQ__KAFKA_TO_NATS__INPUT__KAFKA__TLS__CA_FILE", "/path_to_ca");
+            std::env::set_var(
+                "HQ__KAFKA_TO_NATS__INPUT__KAFKA__TLS__CA_FILE",
+                "/path_to_ca",
+            );
             std::env::set_var(
                 "HQ__KAFKA_TO_NATS__INPUT__KAFKA__TLS__ACCEPT_INVALID_CERTS",
                 "true",
             );
             std::env::set_var("HQ__KAFKA_TO_NATS__OUTPUT__NATS__SUBJECT", "output-subject");
-            std::env::set_var("HQ__KAFKA_TO_NATS__OUTPUT__NATS__URL", "nats://localhost:4222");
+            std::env::set_var(
+                "HQ__KAFKA_TO_NATS__OUTPUT__NATS__URL",
+                "nats://localhost:4222",
+            );
             std::env::set_var(
                 "HQ__KAFKA_TO_NATS__INPUT__MIDDLEWARES__DLQ__NATS__SUBJECT",
                 "dlq-subject",
@@ -255,11 +271,15 @@ kafka_to_nats:
                 "HQ__KAFKA_TO_NATS__INPUT__MIDDLEWARES__DLQ__NATS__URL",
                 "nats://localhost:4222",
             );
-        } 
+        }
 
         let builder = ConfigBuilder::builder()
             // Enable automatic type parsing for values from environment variables.
-            .add_source(Environment::with_prefix("HQ").separator("__").try_parsing(true));
+            .add_source(
+                Environment::with_prefix("HQ")
+                    .separator("__")
+                    .try_parsing(true),
+            );
 
         let config: Config = builder
             .build()

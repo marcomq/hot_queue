@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CanonicalMessage {
-    pub message_id: u64,
+    pub message_id: Option<u64>,
     pub payload: Vec<u8>,
     #[serde(default)]
     pub metadata: HashMap<String, String>,
@@ -11,9 +11,8 @@ pub struct CanonicalMessage {
 
 impl CanonicalMessage {
     pub fn new(payload: Vec<u8>) -> Self {
-        let message_id = seahash::hash(&payload);
         Self {
-            message_id,
+            message_id: None,
             payload,
             metadata: HashMap::new(),
         }

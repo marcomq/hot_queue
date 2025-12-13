@@ -1,7 +1,7 @@
 use crate::config::MqttConfig;
 use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
-use crate::publishers::MessagePublisher;
+use crate::traits::MessagePublisher;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};

@@ -2,10 +2,9 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/streamqueue
-use crate::config::FileConfig;
-use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
-use crate::model::CanonicalMessage;
-use crate::publishers::MessagePublisher;
+use crate::traits::MessagePublisher;
+use crate::traits::{BoxFuture, CommitFunc, MessageConsumer};
+use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use std::any::Any;
@@ -24,8 +23,8 @@ pub struct FilePublisher {
 }
 
 impl FilePublisher {
-    pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
-        let path = Path::new(&config.path);
+    pub async fn new(path_str: &str) -> anyhow::Result<Self> {
+        let path = Path::new(&path_str);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.with_context(|| {
                 format!("Failed to create parent directory for file: {:?}", parent)
@@ -35,13 +34,11 @@ impl FilePublisher {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&config.path)
+            .open(&path)
             .await
-            .with_context(|| {
-                format!("Failed to open or create file for writing: {}", config.path)
-            })?;
+            .with_context(|| format!("Failed to open or create file for writing: {}", path_str))?;
 
-        info!(path = %config.path, "File sink opened for appending");
+        info!(path = %path_str, "File sink opened for appending");
         Ok(Self {
             writer: Arc::new(Mutex::new(BufWriter::new(file))),
         })
@@ -50,7 +47,7 @@ impl FilePublisher {
 
 #[async_trait]
 impl MessagePublisher for FilePublisher {
-    #[instrument(skip_all, fields(message_id = %message.message_id))]
+    #[instrument(skip_all, fields(message_id = ?message.message_id))]
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let mut payload = message.payload;
         payload.push(b'\n'); // Add a newline to separate messages
@@ -80,17 +77,17 @@ pub struct FileConsumer {
 }
 
 impl FileConsumer {
-    pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
+    pub async fn new(path: &str) -> anyhow::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
-            .open(&config.path)
+            .open(&path)
             .await
-            .with_context(|| format!("Failed to open file for reading: {}", config.path))?;
+            .with_context(|| format!("Failed to open file for reading: {}", path))?;
 
-        info!(path = %config.path, "File source opened for reading");
+        info!(path = %path, "File source opened for reading");
         Ok(Self {
             reader: BufReader::new(file),
-            path: config.path.clone(),
+            path: path.to_string(),
         })
     }
 }
@@ -123,12 +120,11 @@ impl MessageConsumer for FileConsumer {
 
 #[cfg(test)]
 mod tests {
+    use crate::traits::MessageConsumer;
+    use crate::traits::MessagePublisher;
     use crate::{
-        config::FileConfig,
-        consumers::MessageConsumer,
         endpoints::file::{FileConsumer, FilePublisher},
-        model::CanonicalMessage,
-        publishers::MessagePublisher,
+        CanonicalMessage,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -141,10 +137,7 @@ mod tests {
         let file_path_str = file_path.to_str().unwrap().to_string();
 
         // 2. Create a FileSink
-        let sink_config = FileConfig {
-            path: file_path_str.clone(),
-        };
-        let sink = FilePublisher::new(&sink_config).await.unwrap();
+        let sink = FilePublisher::new(&file_path_str).await.unwrap();
 
         let msg1 = CanonicalMessage::from_json(json!({"hello": "world"})).unwrap();
         let msg2 = CanonicalMessage::from_json(json!({"foo": "bar"})).unwrap();
@@ -157,10 +150,7 @@ mod tests {
         drop(sink);
 
         // 4. Create a FileConsumer to read from the same file
-        let source_config = FileConfig {
-            path: file_path_str.clone(),
-        };
-        let mut source = FileConsumer::new(&source_config).await.unwrap();
+        let mut source = FileConsumer::new(&file_path_str).await.unwrap();
 
         // 5. Receive the messages and verify them
         let (received_msg1, commit1) = source.receive().await.unwrap();
@@ -187,11 +177,7 @@ mod tests {
         let nested_dir_path = dir.path().join("nested");
         let file_path = nested_dir_path.join("test.log");
 
-        // The `nested` directory does not exist yet, FileSink::new should create it.
-        let sink_config = FileConfig {
-            path: file_path.to_str().unwrap().to_string(),
-        };
-        let sink_result = FilePublisher::new(&sink_config).await;
+        let sink_result = FilePublisher::new(&file_path.to_str().unwrap()).await;
 
         assert!(sink_result.is_ok());
         assert!(nested_dir_path.exists());

@@ -1,7 +1,7 @@
 use crate::config::AmqpConfig;
 use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
-use crate::publishers::MessagePublisher;
+use crate::traits::MessagePublisher;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use lapin::tcp::{OwnedIdentity, OwnedTLSConfig};

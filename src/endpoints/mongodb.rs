@@ -1,7 +1,7 @@
 use crate::config::MongoDbConfig;
 use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::model::CanonicalMessage;
-use crate::publishers::MessagePublisher;
+use crate::traits::MessagePublisher;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::StreamExt;

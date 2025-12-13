@@ -3,10 +3,10 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/streamqueue
 
-use crate::config::MemoryConfig;
-use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
-use crate::model::CanonicalMessage;
-use crate::publishers::MessagePublisher;
+use crate::models::MemoryConfig;
+use crate::traits::MessagePublisher;
+use crate::traits::{BoxFuture, CommitFunc, MessageConsumer};
+use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
@@ -189,7 +189,7 @@ impl MessageConsumer for MemoryConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CanonicalMessage;
+    use crate::CanonicalMessage;
     use serde_json::json;
     use tokio::time::sleep;
 

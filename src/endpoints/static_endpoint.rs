@@ -3,9 +3,9 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/streamqueue
 
-use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
-use crate::model::CanonicalMessage;
-use crate::publishers::MessagePublisher;
+use crate::traits::MessagePublisher;
+use crate::traits::{BoxFuture, CommitFunc, MessageConsumer};
+use crate::CanonicalMessage;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::any::Any;
