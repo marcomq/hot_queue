@@ -1,0 +1,70 @@
+[package]
+name = "hot_queue"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+config = { version = "0.15" }
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0.86"
+
+# Common TLS dependencies
+rustls = { version = "0.23", features = ["ring"], optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+rustls-pemfile = { version = "2.2", optional = true }
+
+# Metrics
+metrics = { version = "0.24" }
+
+# Storage for Deduplication
+sled = { version = "0.34", optional = true }
+
+# --- Optional Endpoint Dependencies ---
+
+# Kafka
+rdkafka = { version = "0.38", features = ["tokio"], optional = true }
+async-stream = { version = "0.3", optional = true } # Used by Kafka consumer
+
+# AMQP (RabbitMQ)
+lapin = { version = "3.7", features = ["rustls"], optional = true }
+
+# MongoDB
+mongodb = { version = "3.4", optional = true }
+
+# NATS
+async-nats = { version = "0.45", optional = true }
+
+# MQTT
+rumqttc = { version = "0.25.1", optional = true }
+
+# HTTP
+axum = { version = "0.8.7", optional = true }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true }
+axum-server = { version = "0.8.0", features = ["tls-rustls"], optional = true }
+
+# Environment Variable Support
+dotenvy = { version = "0.15", optional = true }
+
+[features]
+default = ["core"]
+core = ["dedup", "dotenv"]
+full = ["dedup", "dotenv", "mongodb", "kafka", "amqp", "nats", "mqtt", "http"]
+
+# Functionality features
+dedup = ["sled"]
+dotenv = ["dotenvy"]
+
+
+# Endpoint features
+kafka = ["rdkafka", "async-stream"]
+amqp = ["lapin", "rustls", "rustls-pemfile"]
+nats = ["async-nats", "rustls", "rustls-pemfile"]
+mongodb = ["dep:mongodb"]
+mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile"]
+http = ["axum", "reqwest", "axum-server", "rustls", "tokio-rustls", "rustls-pemfile"]
+file = [] # No extra deps
+
+[dev-dependencies]
+# We only need yaml parsing for tests at the moment
+serde_yaml_ng = "0.10.0"
