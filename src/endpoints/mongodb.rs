@@ -1,7 +1,6 @@
-use crate::config::MongoDbConfig;
-use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
-use crate::model::CanonicalMessage;
-use crate::traits::MessagePublisher;
+use crate::models::MongoDbConfig;
+use crate::traits::{BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -36,7 +35,7 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
             .context("Failed to deserialize metadata from BSON document")?;
 
         Ok(CanonicalMessage {
-            message_id: raw.message_id as u64,
+            message_id: Some(raw.message_id as u64),
             payload: raw.payload.bytes,
             metadata,
         })
@@ -66,12 +65,18 @@ impl MessagePublisher for MongoDbPublisher {
         msg_with_metadata
             .metadata
             .insert("mongodb_object_id".to_string(), object_id.to_string());
-
+        let message_id_i64: Option<i64> = if let Some(id) = msg_with_metadata
+            .message_id {
+                Some(id as i64)
+            }
+            else {
+                None
+            };
         // Manually construct the document to handle u64 message_id for BSON.
         // BSON only supports i64, so we do a wrapping conversion.
         let doc = doc! {
             "_id": object_id,
-            "message_id": msg_with_metadata.message_id as i64, // Convert u64 to i64
+            "message_id": message_id_i64, // Convert u64 to i64
             "payload": Bson::Binary(mongodb::bson::Binary {
                 subtype: mongodb::bson::spec::BinarySubtype::Generic,
                 bytes: msg_with_metadata.payload.clone() }),

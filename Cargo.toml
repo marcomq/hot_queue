@@ -37,6 +37,7 @@ lapin = { version = "3.7", features = ["rustls"], optional = true }
 
 # MongoDB
 mongodb = { version = "3.4", optional = true }
+uuid = { version = "1.19", features = ["v4"], optional = true }
 
 # NATS
 async-nats = { version = "0.45", optional = true }
@@ -48,6 +49,9 @@ rumqttc = { version = "0.25.1", optional = true }
 axum = { version = "0.8.7", optional = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true }
 axum-server = { version = "0.8.0", features = ["tls-rustls"], optional = true }
+
+
+url = { version = "2.5", optional = true }
 
 # Memory (for testing) # TODO - use tokio
 async-channel = { version = "2.5.0" }
@@ -68,10 +72,10 @@ dotenv = ["dotenvy"]
 
 # Endpoint features
 kafka = ["rdkafka", "async-stream"]
-amqp = ["lapin", "rustls", "rustls-pemfile"]
+amqp = ["lapin", "rustls", "rustls-pemfile", "url"]
 nats = ["async-nats", "rustls", "rustls-pemfile"]
-mongodb = ["dep:mongodb"]
-mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile"]
+mongodb = ["dep:mongodb", "uuid"]
+mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "url"]
 http = ["axum", "reqwest", "axum-server", "rustls", "tokio-rustls", "rustls-pemfile"]
 file = [] # No extra deps
 

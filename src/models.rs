@@ -1,3 +1,8 @@
+//  hot_queue
+//  © Copyright 2025, by Marco Mengelkoch
+//  Licensed under MIT License, see License file for more details
+//  git clone https://github.com/marcomq/hot_queue
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -46,7 +51,10 @@ pub enum EndpointType {
     File(String),
     Static(String),
     Memory(MemoryConfig),
-    // Other endpoint types like Amqp, Mongodb can be added here.
+    Amqp(AmqpEndpoint),
+    MongoDb(MongoDbEndpoint),
+    Mqtt(MqttEndpoint),
+    Http(HttpEndpoint),
 }
 
 /// Configuration for middlewares applied to an endpoint.
@@ -90,7 +98,7 @@ pub struct DeadLetterQueueMiddleware {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KafkaEndpoint {
-    pub topic: String,
+    pub topic: Option<String>,
     #[serde(flatten)]
     pub config: KafkaConfig,
 }
@@ -100,11 +108,15 @@ pub struct KafkaEndpoint {
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
     pub brokers: String,
-    pub group_id: String,
+    pub group_id: Option<String>,
     pub username: Option<String>,
-    pub password: Option<String>,
+    pub password: Option<String>, // Consider using a secret management type
     #[serde(default)]
-    pub tls: Option<TlsConfig>,
+    pub tls: TlsConfig,
+    #[serde(default)]
+    pub await_ack: bool,
+    pub producer_options: Option<HashMap<String, String>>,
+    pub consumer_options: Option<HashMap<String, String>>,
 }
 
 // --- NATS Specific Configuration ---
@@ -113,7 +125,8 @@ pub struct KafkaConfig {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NatsEndpoint {
-    pub subject: String,
+    pub subject: Option<String>,
+    pub stream: Option<String>,
     #[serde(flatten)]
     pub config: NatsConfig,
 }
@@ -127,7 +140,10 @@ pub struct NatsConfig {
     pub password: Option<String>,
     pub token: Option<String>,
     #[serde(default)]
-    pub tls: Option<TlsConfig>,
+    pub tls: TlsConfig,
+    #[serde(default)]
+    pub await_ack: bool,
+    pub default_stream: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -137,10 +153,97 @@ pub struct MemoryConfig {
     pub capacity: Option<usize>,
 }
 
+// --- AMQP Specific Configuration ---
+
+/// AMQP endpoint configuration, combining connection and queue details.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmqpEndpoint {
+    pub queue: Option<String>,
+    #[serde(flatten)]
+    pub config: AmqpConfig,
+}
+
+/// General AMQP connection configuration.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmqpConfig {
+    pub url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    #[serde(default)]
+    pub tls: TlsConfig,
+    #[serde(default)]
+    pub await_ack: bool,
+}
+
+// --- MongoDB Specific Configuration ---
+
+/// MongoDB endpoint configuration.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoDbEndpoint {
+    pub collection: Option<String>,
+    #[serde(flatten)]
+    pub config: MongoDbConfig,
+}
+
+/// General MongoDB connection configuration.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoDbConfig {
+    pub url: String,
+    pub database: String,
+}
+
+// --- MQTT Specific Configuration ---
+
+/// MQTT endpoint configuration.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MqttEndpoint {
+    pub topic: Option<String>,
+    #[serde(flatten)]
+    pub config: MqttConfig,
+}
+
+/// General MQTT connection configuration.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MqttConfig {
+    pub url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    #[serde(default)]
+    pub tls: TlsConfig,
+    pub queue_capacity: Option<usize>,
+}
+
+// --- HTTP Specific Configuration ---
+
+/// HTTP endpoint configuration.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpEndpoint {
+    #[serde(flatten)]
+    pub config: HttpConfig,
+}
+
+/// General HTTP connection configuration.
+#[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct HttpConfig {
+    pub url: Option<String>,
+    pub listen_address: Option<String>,
+    #[serde(default)]
+    pub tls: TlsConfig,
+    pub response_sink: Option<String>,
+}
+
 // --- Common Configuration ---
 
 /// TLS configuration for secure connections.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     pub required: bool,
@@ -150,6 +253,15 @@ pub struct TlsConfig {
     pub cert_password: Option<String>,
     #[serde(default)]
     pub accept_invalid_certs: bool,
+}
+
+impl TlsConfig {
+    pub fn is_mtls_client_configured(&self) -> bool {
+        self.required && self.cert_file.is_some() && self.key_file.is_some()
+    }
+    pub fn is_tls_server_configured(&self) -> bool {
+        self.required && self.cert_file.is_some() && self.key_file.is_some()
+    }
 }
 
 #[cfg(test)]
@@ -163,7 +275,7 @@ kafka_to_nats:
   input:
     middlewares:
       deduplication:
-        sled_path: "/tmp/streamqueue/dedup_db"
+        sled_path: "/tmp/hot_queue/dedup_db"
         ttl_seconds: 3600
       metrics: {}
       dlq:
@@ -197,21 +309,21 @@ kafka_to_nats:
         let input = &route.input;
         assert!(input.middlewares.metrics.is_some());
         let dedup = input.middlewares.deduplication.as_ref().unwrap();
-        assert_eq!(dedup.sled_path, "/tmp/streamqueue/dedup_db");
+        assert_eq!(dedup.sled_path, "/tmp/hot_queue/dedup_db");
         assert_eq!(dedup.ttl_seconds, 3600);
 
         if let EndpointType::Nats(dlq_nats) = &input.middlewares.dlq.as_ref().unwrap().endpoint {
-            assert_eq!(dlq_nats.subject, "dlq-subject");
+            assert_eq!(dlq_nats.subject, Some("dlq-subject".to_string()));
             assert_eq!(dlq_nats.config.url, "nats://localhost:4222");
         } else {
             panic!("DLQ endpoint should be NATS");
         }
 
         if let EndpointType::Kafka(kafka) = &input.endpoint_type {
-            assert_eq!(kafka.topic, "input-topic");
+            assert_eq!(kafka.topic, Some("input-topic".to_string()));
             assert_eq!(kafka.config.brokers, "localhost:9092");
-            assert_eq!(kafka.config.group_id, "my-consumer-group");
-            let tls = kafka.config.tls.as_ref().unwrap();
+            assert_eq!(kafka.config.group_id, Some("my-consumer-group".to_string()));
+            let tls = &kafka.config.tls;
             assert_eq!(tls.required, true);
             assert_eq!(tls.ca_file.as_deref(), Some("/path_to_ca"));
             assert_eq!(tls.accept_invalid_certs, true);
@@ -222,7 +334,7 @@ kafka_to_nats:
         // --- Assert Output ---
         let output = &route.output;
         if let EndpointType::Nats(nats) = &output.endpoint_type {
-            assert_eq!(nats.subject, "output-subject");
+            assert_eq!(nats.subject, Some("output-subject".to_string()));
             assert_eq!(nats.config.url, "nats://localhost:4222");
         } else {
             panic!("Output endpoint should be NATS");
@@ -290,8 +402,8 @@ kafka_to_nats:
         // We can't test all values from env, but we can check the ones we set.
         assert_eq!(config.get("kafka_to_nats").unwrap().concurrency, 10);
         if let EndpointType::Kafka(k) = &config.get("kafka_to_nats").unwrap().input.endpoint_type {
-            assert_eq!(k.topic, "input-topic");
-            assert!(k.config.tls.as_ref().unwrap().required);
+            assert_eq!(k.topic, Some("input-topic".to_string()));
+            assert!(k.config.tls.required);
         }
     }
 }

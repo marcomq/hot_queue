@@ -1,12 +1,11 @@
-//  streamqueue
+//  hot_queue
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
-//  git clone https://github.com/marcomq/streamqueue
+//  git clone https://github.com/marcomq/hot_queue
 
-use crate::config::HttpConfig;
-use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
-use crate::model::CanonicalMessage;
-use crate::traits::MessagePublisher;
+use crate::models::HttpConfig;
+use crate::traits::{BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use axum::{

@@ -1,7 +1,6 @@
-use crate::config::KafkaConfig;
-use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
-use crate::model::CanonicalMessage;
-use crate::publishers::MessagePublisher;
+use crate::models::KafkaConfig;
+use crate::traits::{BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_stream::stream;
 use async_trait::async_trait;
@@ -148,7 +147,11 @@ impl MessagePublisher for KafkaPublisher {
             record = record.headers(headers);
         }
 
-        let key = message.message_id.to_string();
+        let key = if let Some(id) = &message.message_id {
+            id.to_string()
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
         record = record.key(&key);
 
         if self.await_ack {

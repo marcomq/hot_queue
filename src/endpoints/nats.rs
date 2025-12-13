@@ -1,7 +1,6 @@
-use crate::config::NatsConfig;
-use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
-use crate::model::CanonicalMessage;
-use crate::traits::MessagePublisher;
+use crate::models::NatsConfig;
+use crate::traits::{BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_nats::{header::HeaderMap, jetstream, jetstream::stream, ConnectOptions};
 use async_trait::async_trait;

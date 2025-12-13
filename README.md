@@ -36,7 +36,7 @@ kafka_to_nats: # The top-level keys are the route names
     # (Optional) A list of middlewares to apply to each endpoint before or after send
     middlewares:
       deduplication:
-        sled_path: "/tmp/streamqueue/dedup_db"
+        sled_path: "/tmp/hot_queue/dedup_db"
         ttl_seconds: 3600
       metrics:
         # metrics doesn't have much configuration, its presence enables it.

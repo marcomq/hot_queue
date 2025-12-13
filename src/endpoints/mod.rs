@@ -1,7 +1,7 @@
-//  streamqueue
+//  hot_queue
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
-//  git clone https://github.com/marcomq/streamqueue
+//  git clone https://github.com/marcomq/hot_queue
 
 #[cfg(feature = "amqp")]
 pub mod amqp;
@@ -41,7 +41,7 @@ pub async fn create_consumer_from_route(
             let stream_name = cfg
                 .stream
                 .as_deref()
-                .or(cfg.config.default_stream.as_deref())
+                .or(cfg.stream.as_deref())
                 .ok_or_else(|| {
                     anyhow!(
                         "[route:{}] NATS consumer must specify a 'stream' or have a 'default_stream'",
@@ -95,32 +95,32 @@ pub async fn create_publisher_from_route(
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(cfg) => {
             let topic = cfg.topic.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(kafka::KafkaPublisher::new(&cfg, topic).await?))
+            Ok(Arc::new(kafka::KafkaPublisher::new(&cfg.config, topic).await?))
         }
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
             let subject = cfg.subject.as_deref().unwrap_or(route_name);
             Ok(Arc::new(
-                nats::NatsPublisher::new(&cfg, subject, cfg.stream.as_deref()).await?,
+                nats::NatsPublisher::new(&cfg.config, subject, cfg.stream.as_deref()).await?,
             ))
         }
         #[cfg(feature = "amqp")]
         EndpointType::Amqp(cfg) => {
             let queue = cfg.queue.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(amqp::AmqpPublisher::new(&cfg, queue).await?))
+            Ok(Arc::new(amqp::AmqpPublisher::new(&&cfg.config, queue).await?))
         }
         #[cfg(feature = "mqtt")]
         EndpointType::Mqtt(cfg) => {
             let topic = cfg.topic.as_deref().unwrap_or(route_name);
             Ok(Arc::new(
-                mqtt::MqttPublisher::new(&cfg, topic, route_name).await?,
+                mqtt::MqttPublisher::new(&cfg.config, topic, route_name).await?,
             ))
         }
         EndpointType::File(cfg) => Ok(Arc::new(file::FilePublisher::new(cfg).await?)),
         #[cfg(feature = "http")]
         EndpointType::Http(cfg) => {
-            let mut sink = http::HttpPublisher::new(&cfg).await?;
-            if let Some(url) = &cfg.url {
+            let mut sink = http::HttpPublisher::new(&cfg.config).await?;
+            if let Some(url) = &cfg.config.url {
                 sink = sink.with_url(url);
             }
             Ok(Arc::new(sink))
@@ -133,7 +133,7 @@ pub async fn create_publisher_from_route(
         EndpointType::MongoDb(cfg) => {
             let collection = cfg.collection.as_deref().unwrap_or(route_name);
             Ok(Arc::new(
-                mongodb::MongoDbPublisher::new(&cfg, collection).await?,
+                mongodb::MongoDbPublisher::new(&cfg.config, collection).await?,
             ))
         }
         #[allow(unreachable_patterns)]

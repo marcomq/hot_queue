@@ -1,7 +1,7 @@
-//  streamqueue
+//  hot_queue
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
-//  git clone https://github.com/marcomq/streamqueue
+//  git clone https://github.com/marcomq/hot_queue
 use crate::traits::MessagePublisher;
 use crate::traits::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::CanonicalMessage;

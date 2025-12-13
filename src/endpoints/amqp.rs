@@ -1,6 +1,6 @@
-use crate::config::AmqpConfig;
-use crate::consumers::{BoxFuture, CommitFunc, MessageConsumer};
-use crate::model::CanonicalMessage;
+use crate::models::AmqpConfig;
+use crate::traits::{BoxFuture, CommitFunc, MessageConsumer};
+use crate::CanonicalMessage;
 use crate::traits::MessagePublisher;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -124,7 +124,7 @@ impl AmqpConsumer {
         let consumer = channel
             .basic_consume(
                 queue,
-                "streamqueue_amqp_consumer",
+                "hot_queue_amqp_consumer",
                 BasicConsumeOptions::default(),
                 FieldTable::default(),
             )
