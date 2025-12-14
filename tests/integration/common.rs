@@ -343,17 +343,14 @@ pub async fn measure_read_performance(
         tasks.spawn(async move {
             loop {
                 // Use `try_acquire` to avoid blocking forever.
-                // If there are no more permits, the worker's job is done.
-                match semaphore_clone.try_acquire() {
-                    Ok(permit) => {
-                        permit.forget();
-                    }
-                    Err(_) => {
-                        break; // No more permits, exit the loop.
-                    }
-                }
-                if semaphore_clone.try_acquire().is_err() {
-                    break; // No more permits, exit the loop.
+                // Acquire a permit. If it fails, all messages have been accounted for,
+                // so the worker's job is done.
+                // We must `forget` the permit, otherwise it's returned to the semaphore
+                // when it goes out of scope.
+                if let Ok(permit) = semaphore_clone.try_acquire() {
+                    permit.forget();
+                } else {
+                    break;
                 }
 
                 match consumer_clone.lock().await.receive().await {

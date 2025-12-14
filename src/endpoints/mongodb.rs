@@ -65,11 +65,19 @@ impl MessagePublisher for MongoDbPublisher {
         msg_with_metadata
             .metadata
             .insert("mongodb_object_id".to_string(), object_id.to_string());
-        let message_id_i64: Option<i64> = if let Some(id) = msg_with_metadata.message_id {
-            Some(id as i64)
-        } else {
-            None
-        };
+
+        if msg_with_metadata.message_id.is_none() {
+            // If no message_id is present, generate one from the ObjectId.
+            // We combine the 4-byte timestamp with the last 4 bytes, which include
+            // the 3-byte incrementing counter. This creates a highly unique ID.
+            let oid_bytes = object_id.bytes();
+            let mut id_bytes = [0u8; 8];
+            id_bytes[0..4].copy_from_slice(&oid_bytes[0..4]); // Timestamp
+            id_bytes[4..8].copy_from_slice(&oid_bytes[8..12]); // Last byte of random + 3-byte counter
+            msg_with_metadata.message_id = Some(u64::from_be_bytes(id_bytes));
+        }
+        let message_id_i64: Option<i64> = msg_with_metadata.message_id.map(|id| id as i64);
+
         // Manually construct the document to handle u64 message_id for BSON.
         // BSON only supports i64, so we do a wrapping conversion.
         let doc = doc! {
@@ -147,41 +155,48 @@ impl MongoDbConsumer {
 #[async_trait]
 impl MessageConsumer for MongoDbConsumer {
     async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        if let Some(stream_mutex) = &self.change_stream {
-            // Change Stream Path: More efficient for replica sets
-            let mut stream = stream_mutex.lock().await;
-            loop {
-                let event = match stream.next().await {
-                    Some(Ok(evt)) => evt,
-                    Some(Err(e)) => return Err(e.into()),
-                    None => return Err(anyhow!("MongoDB change stream ended unexpectedly")),
-                };
-
-                let doc_id = match event
-                    .full_document
-                    .as_ref()
-                    .and_then(|d| d.get_object_id("_id").ok())
-                {
-                    Some(id) => id,
-                    None => continue, // Not an insert or document missing _id, wait for next event
-                };
-
-                // Attempt to claim this specific document
-                if let Some((msg, commit)) = self.try_claim_document(doc! {"_id": doc_id}).await? {
-                    return Ok((msg, commit));
+        loop {
+            // This outer loop handles both polling and change stream logic.
+            if let Some(stream_mutex) = &self.change_stream {
+                // --- Change Stream Path ---
+                let mut stream = stream_mutex.lock().await;
+                if let Some(event_result) = stream.next().await {
+                    let event = event_result.context("Error reading from change stream")?;
+                    if let Some(doc_id) =
+                        event.full_document.as_ref().and_then(|d| d.get_object_id("_id").ok())
+                    {
+                        // Attempt to claim the specific document from the event.
+                        // Retry a few times to handle replication lag/visibility delays.
+                        for _ in 0..3 {
+                            if let Some(claimed) = self.try_claim_document(doc! {"_id": doc_id}).await? {
+                                return Ok(claimed);
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        // If we failed, another consumer got it. Log and wait for the next event.
+                        warn!(mongodb_object_id = %doc_id, "Failed to claim document from change stream event after retries. Another consumer may have claimed it.");
+                    }
+                    continue; // Go to the next change stream event
+                } else {
+                    return Err(anyhow!("MongoDB change stream ended unexpectedly"));
                 }
-                // If we failed to claim it, it means another consumer got it first.
-                // We just loop and wait for the next change event.
             }
-        } else {
-            // Polling Path: Fallback for standalone instances
+
+            // --- Polling Path ---
+            // This path is used for standalone instances or as a fallback.
+            // We loop here to immediately retry claiming another document if the first
+            // attempt failed due to a race with another consumer.
             loop {
-                if let Some((msg, commit)) = self.try_claim_document(doc! {}).await? {
-                    return Ok((msg, commit));
+                match self.try_claim_document(doc! {}).await? {
+                    Some(claimed) => return Ok(claimed),
+                    None => {
+                        // No documents were available to be claimed.
+                        // Break the inner loop to wait before the next poll.
+                        break;
+                    }
                 }
-                // No document found, wait before polling again
-                tokio::time::sleep(self.polling_interval).await;
             }
+            tokio::time::sleep(self.polling_interval).await;
         }
     }
 
@@ -198,82 +213,65 @@ impl MongoDbConsumer {
         &self,
         extra_filter: Document,
     ) -> anyhow::Result<Option<(CanonicalMessage, CommitFunc)>> {
-        loop {
-            // Atomically find a message that is not locked or whose lock has expired,
-            // and lock it for this consumer for 60 seconds.
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)?
-                .as_secs() as i64;
-            let lock_duration_secs = 60;
-            let locked_until = now + lock_duration_secs;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs() as i64;
+        let lock_duration_secs = 60;
+        let locked_until = now + lock_duration_secs;
 
-            let mut filter = doc! {
-                "$or": [
-                    { "locked_until": { "$exists": false } },
-                    { "locked_until": null },
-                    { "locked_until": { "$lt": now } }
-                ]
-            };
-            filter.extend(extra_filter.clone());
+        let mut filter = doc! {
+            "$or": [
+                { "locked_until": { "$exists": false } },
+                { "locked_until": null },
+                { "locked_until": { "$lt": now } }
+            ]
+        };
+        filter.extend(extra_filter);
 
-            let update = doc! { "$set": { "locked_until": locked_until } };
+        let update = doc! { "$set": { "locked_until": locked_until } };
 
-            // Projection to only return the fields we need, reducing data over the wire.
-            let projection = doc! {
-                "message_id": 1,
-                "payload": 1,
-                "metadata": 1,
-                "_id": 1
-            };
+        let options = FindOneAndUpdateOptions::builder()
+            .projection(doc! { "message_id": 1, "payload": 1, "metadata": 1, "_id": 1 })
+            .sort(doc! { "_id": 1 }) // Process oldest documents first (FIFO)
+            .build();
 
-            let options = FindOneAndUpdateOptions::builder()
-                .projection(projection)
-                .sort(doc! { "_id": 1 }) // Process oldest documents first (FIFO)
-                .build();
+        match self
+            .collection
+            .find_one_and_update(filter, update).with_options(options)
+            .await
+        {
+            Ok(Some(doc)) => {
+                let raw_msg: MongoMessageRaw =
+                    mongodb::bson::from_document(doc.clone()).context("Failed to deserialize MongoDB document")?;
+                let msg: CanonicalMessage = raw_msg.try_into()?;
 
-            match self
-                .collection
-                .find_one_and_update(filter, update)
-                .with_options(options)
-                .await
-            {
-                Ok(Some(doc)) => {
-                    let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc.clone())
-                        .context("Failed to deserialize MongoDB document")?;
-                    let msg: CanonicalMessage = raw_msg.try_into()?;
+                let object_id = doc
+                    .get_object_id("_id")
+                    .map_err(|_| anyhow!("Could not find or parse _id in returned document"))?;
 
-                    let object_id = doc
-                        .get_object_id("_id")
-                        .map_err(|_| anyhow!("Could not find or parse _id in returned document"))?;
+                let collection_clone = self.collection.clone();
 
-                    let collection_clone = self.collection.clone();
-
-                    // The commit function will delete the message from the collection.
-                    let commit = Box::new(move |_response| {
-                        Box::pin(async move {
-                            match collection_clone.delete_one(doc! { "_id": object_id }).await {
-                                Ok(delete_result) => {
-                                    if delete_result.deleted_count == 1 {
-                                        tracing::trace!(mongodb_object_id = %object_id, "MongoDB message acknowledged and deleted");
-                                    } else {
-                                        warn!(mongodb_object_id = %object_id, "Attempted to ack/delete MongoDB message, but it was not found (already deleted?)");
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!(mongodb_object_id = %object_id, error = %e, "Failed to ack/delete MongoDB message");
+                let commit = Box::new(move |_response| {
+                    Box::pin(async move {
+                        match collection_clone.delete_one(doc! { "_id": object_id }).await {
+                            Ok(delete_result) => {
+                                if delete_result.deleted_count == 1 {
+                                    tracing::trace!(mongodb_object_id = %object_id, "MongoDB message acknowledged and deleted");
+                                } else {
+                                    warn!(mongodb_object_id = %object_id, "Attempted to ack/delete MongoDB message, but it was not found (already deleted?)");
                                 }
                             }
-                        }) as BoxFuture<'static, ()>
-                    });
+                            Err(e) => {
+                                tracing::error!(mongodb_object_id = %object_id, error = %e, "Failed to ack/delete MongoDB message");
+                            }
+                        }
+                    }) as BoxFuture<'static, ()>
+                });
 
-                    return Ok(Some((msg, commit)));
-                }
-                Ok(None) => {
-                    // No document found or claimed
-                    return Ok(None);
-                }
-                Err(e) => return Err(e.into()),
+                Ok(Some((msg, commit)))
             }
+            Ok(None) => Ok(None), // No document found or claimed
+            Err(e) => Err(e.into()),
         }
     }
 }
