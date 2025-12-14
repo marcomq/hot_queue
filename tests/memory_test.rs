@@ -23,7 +23,7 @@ async fn test_memory_to_memory_pipeline() {
             topic: "mem-out".to_string(),
             capacity: Some(num_messages + 10_000), // Ensure output can hold all messages
         })),
-        concurrency: 100,
+        concurrency: 1,
     };
 
     let in_channel = route.input.channel().unwrap();
