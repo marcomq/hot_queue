@@ -6,14 +6,11 @@ use hot_queue::traits::{CommitFunc, MessageConsumer};
 use hot_queue::{CanonicalMessage, Route};
 use serde_json::json;
 use std::any::Any;
-use std::collections::HashSet;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
-use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
-use metrics_util::MetricKind;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -137,10 +134,10 @@ pub async fn run_performance_pipeline_test(
 }
 
 async fn run_pipeline_test_internal(
-    broker_name: &str,
-    config_yaml: &str,
-    num_messages: usize,
-    is_performance_test: bool,
+    _broker_name: &str,
+    _config_yaml: &str,
+    _num_messages: usize,
+    _is_performance_test: bool,
 ) {
     /*
     let app_config: AppConfig =

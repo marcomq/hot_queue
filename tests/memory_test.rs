@@ -1,5 +1,4 @@
 use hot_queue::models::{Endpoint, EndpointType, MemoryConfig, Route};
-use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 mod integration;
