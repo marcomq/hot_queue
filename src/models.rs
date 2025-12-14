@@ -13,7 +13,7 @@ use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
 pub type Config = HashMap<String, Route>;
 
 /// Defines a single message processing route from an input to an output.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Route {
     /// (Optional) Number of concurrent processing tasks for this route. Defaults to 1.
@@ -30,7 +30,7 @@ fn default_concurrency() -> usize {
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     /// (Optional) A list of middlewares to apply to the endpoint.
@@ -60,7 +60,7 @@ impl Endpoint {
 /// An enumeration of all supported endpoint types.
 /// `#[serde(rename_all = "lowercase")]` ensures that the keys in the config (e.g., "kafka")
 /// match the enum variants.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum EndpointType {
     Kafka(KafkaEndpoint),
@@ -75,7 +75,7 @@ pub enum EndpointType {
 }
 
 /// Configuration for middlewares applied to an endpoint.
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Middlewares {
     #[serde(default)]
@@ -88,7 +88,7 @@ pub struct Middlewares {
 }
 
 /// Deduplication middleware configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct DeduplicationMiddleware {
     pub sled_path: String,
@@ -97,12 +97,12 @@ pub struct DeduplicationMiddleware {
 
 /// Metrics middleware configuration. It's currently a struct without fields
 /// but can be extended later. Its presence in the config enables the middleware.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsMiddleware {}
 
 /// Dead-Letter Queue (DLQ) middleware configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct DeadLetterQueueMiddleware {
     #[serde(flatten)]
@@ -112,7 +112,7 @@ pub struct DeadLetterQueueMiddleware {
 // --- Kafka Specific Configuration ---
 
 /// Kafka endpoint configuration, combining connection and topic details.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct KafkaEndpoint {
     pub topic: Option<String>,
@@ -121,7 +121,7 @@ pub struct KafkaEndpoint {
 }
 
 /// General Kafka connection configuration.
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
     pub brokers: String,
@@ -141,7 +141,7 @@ pub struct KafkaConfig {
 // --- NATS Specific Configuration ---
 
 /// NATS endpoint configuration, combining connection and subject details.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct NatsEndpoint {
     pub subject: Option<String>,
@@ -151,7 +151,7 @@ pub struct NatsEndpoint {
 }
 
 /// General NATS connection configuration.
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {
     pub url: String,
@@ -175,7 +175,7 @@ pub struct MemoryConfig {
 // --- AMQP Specific Configuration ---
 
 /// AMQP endpoint configuration, combining connection and queue details.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AmqpEndpoint {
     pub queue: Option<String>,
@@ -184,7 +184,7 @@ pub struct AmqpEndpoint {
 }
 
 /// General AMQP connection configuration.
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AmqpConfig {
     pub url: String,
@@ -199,7 +199,7 @@ pub struct AmqpConfig {
 // --- MongoDB Specific Configuration ---
 
 /// MongoDB endpoint configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct MongoDbEndpoint {
     pub collection: Option<String>,
@@ -208,7 +208,7 @@ pub struct MongoDbEndpoint {
 }
 
 /// General MongoDB connection configuration.
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MongoDbConfig {
     pub url: String,
@@ -218,7 +218,7 @@ pub struct MongoDbConfig {
 // --- MQTT Specific Configuration ---
 
 /// MQTT endpoint configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct MqttEndpoint {
     pub topic: Option<String>,
@@ -227,7 +227,7 @@ pub struct MqttEndpoint {
 }
 
 /// General MQTT connection configuration.
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MqttConfig {
     pub url: String,
@@ -241,7 +241,7 @@ pub struct MqttConfig {
 // --- HTTP Specific Configuration ---
 
 /// HTTP endpoint configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct HttpEndpoint {
     #[serde(flatten)]
@@ -249,7 +249,7 @@ pub struct HttpEndpoint {
 }
 
 /// General HTTP connection configuration.
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     pub url: Option<String>,

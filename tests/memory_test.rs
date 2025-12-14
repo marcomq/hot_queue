@@ -1,5 +1,7 @@
 use hot_queue::models::{Endpoint, EndpointType, MemoryConfig, Route};
-use std::time::{Duration, Instant};
+use std::{
+    time::{Duration, Instant},
+};
 
 mod integration;
 
@@ -12,8 +14,7 @@ async fn test_memory_to_memory_pipeline() {
     integration::common::setup_logging();
 
     let num_messages = 1500_000;
-    let messages_to_send=
-        integration::common::generate_test_messages(num_messages);
+    let messages_to_send = integration::common::generate_test_messages(num_messages);
 
     let route = Route {
         input: Endpoint::new(EndpointType::Memory(MemoryConfig {
@@ -24,13 +25,13 @@ async fn test_memory_to_memory_pipeline() {
             topic: "mem-out".to_string(),
             capacity: Some(num_messages + 10_000), // Ensure output can hold all messages
         })),
-        concurrency: 10,
+        concurrency: 1,
     };
 
     let in_channel = route.input.channel().unwrap();
     let out_channel = route.output.channel().unwrap();
 
-    let bridge_handle = route.run("mem_2_mem");
+    let run_handle = route.run_until_err("mem_2_mem", None);
 
     println!("--- Starting Memory-to-Memory Pipeline Test ---");
 
@@ -41,15 +42,14 @@ async fn test_memory_to_memory_pipeline() {
     });
 
     // Wait for the bridge to finish processing.
-    let _ = tokio::time::timeout(Duration::from_secs(20), bridge_handle)
+    let _ = tokio::time::timeout(Duration::from_secs(20), run_handle)
         .await
         .expect("Test timed out waiting for bridge to complete");
 
     // Ensure the fill task also completed without error
     fill_task.await.unwrap();
 
-    let received = out_channel
-        .drain_messages();
+    let received = out_channel.drain_messages();
     let duration = start_time.elapsed();
 
     let msgs_per_sec = num_messages as f64 / duration.as_secs_f64();

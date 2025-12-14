@@ -162,13 +162,17 @@ impl MessageConsumer for MongoDbConsumer {
                 let mut stream = stream_mutex.lock().await;
                 if let Some(event_result) = stream.next().await {
                     let event = event_result.context("Error reading from change stream")?;
-                    if let Some(doc_id) =
-                        event.full_document.as_ref().and_then(|d| d.get_object_id("_id").ok())
+                    if let Some(doc_id) = event
+                        .full_document
+                        .as_ref()
+                        .and_then(|d| d.get_object_id("_id").ok())
                     {
                         // Attempt to claim the specific document from the event.
                         // Retry a few times to handle replication lag/visibility delays.
                         for _ in 0..3 {
-                            if let Some(claimed) = self.try_claim_document(doc! {"_id": doc_id}).await? {
+                            if let Some(claimed) =
+                                self.try_claim_document(doc! {"_id": doc_id}).await?
+                            {
                                 return Ok(claimed);
                             }
                             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -237,12 +241,13 @@ impl MongoDbConsumer {
 
         match self
             .collection
-            .find_one_and_update(filter, update).with_options(options)
+            .find_one_and_update(filter, update)
+            .with_options(options)
             .await
         {
             Ok(Some(doc)) => {
-                let raw_msg: MongoMessageRaw =
-                    mongodb::bson::from_document(doc.clone()).context("Failed to deserialize MongoDB document")?;
+                let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc.clone())
+                    .context("Failed to deserialize MongoDB document")?;
                 let msg: CanonicalMessage = raw_msg.try_into()?;
 
                 let object_id = doc
