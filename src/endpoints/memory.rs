@@ -132,17 +132,18 @@ impl MessagePublisher for MemoryPublisher {
     async fn send_bulk(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<Option<Vec<CanonicalMessage>>> {
+    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
         self.sender
             .send(messages)
             .await
             .map_err(|e| anyhow!("Failed to send to memory channel: {}", e))?;
         tracing::trace!(
-            "Batch sent to publisher memory channel {}. Current batch count: {}",
-            self.sender.len(),
+            "Batch sent to publisher memory channel. Current batch count: {}",
             self.sender.len()
         );
-        Ok(None)
+        // Memory channel sends are atomic; if it succeeds, all messages were sent.
+        // Return no responses and an empty vec of failed messages.
+        Ok((None, Vec::new()))
     }
 
     fn as_any(&self) -> &dyn Any {

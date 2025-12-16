@@ -80,13 +80,8 @@ impl Route {
         name: &str,
         shutdown_rx: Option<async_channel::Receiver<()>>,
     ) -> anyhow::Result<bool> {
-        let (internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
+        let (_internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
         let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
-        let _shutdown_tx = if shutdown_rx.is_closed() {
-            Some(internal_shutdown_tx)
-        } else {
-            None
-        };
         if self.concurrency == 1 {
             self.run_sequentially(name, shutdown_rx).await
         } else {
@@ -121,8 +116,12 @@ impl Route {
                     debug!("Received a batch of {} messages sequentially", messages.len());
                     // Process the batch sequentially without spawning a new task
                     match publisher.send_bulk(messages).await {
-                        Ok(response) => {
+                        Ok((response, failed)) if failed.is_empty() => {
                             commit(response).await;
+                        }
+                        Ok((response, failed)) => {
+                            commit(response).await; // Commit the successful messages
+                            return Err(anyhow::anyhow!("Failed to send {} messages", failed.len()));
                         }
                         Err(e) => return Err(e.into()), // Propagate error to trigger reconnect
                     }
@@ -155,8 +154,21 @@ impl Route {
                 debug!("Starting worker {}", i);
                 while let Ok((messages, commit)) = work_rx_clone.recv().await {
                     // The worker now receives a batch and sends it as a bulk.
-                    match publisher.send_bulk(messages).await {
-                        Ok(response) => commit(response).await,
+                    match publisher.send_bulk(messages).await { // Note: removed '?' to handle all cases
+                        Ok((response, failed)) if failed.is_empty() => {
+                            commit(response).await;
+                        }
+                        Ok((response, failed)) => {
+                            commit(response).await; // Commit the successful messages
+                            let e = anyhow::anyhow!("Failed to send {} messages", failed.len());
+                            error!("Worker failed to send message batch: {}", e);
+                            // Send the error back to the main task to tear down the route.
+                            if err_tx.send(e).await.is_err() {
+                                warn!(
+                                    "Could not send error to main task, it might be down."
+                                );
+                            }
+                        }
                         Err(e) => {
                             error!("Worker failed to send message batch: {}", e);
                             // Send the error back to the main task to tear down the route.

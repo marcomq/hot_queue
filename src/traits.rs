@@ -56,18 +56,24 @@ pub trait MessagePublisher: Send + Sync + 'static {
     async fn send_bulk(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<Option<Vec<CanonicalMessage>>> {
+    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
         let mut responses = Vec::new();
+        let mut failed_messages = Vec::new();
         for msg in messages {
-            if let Some(resp) = self.send(msg).await? {
-                responses.push(resp);
+            match self.send(msg.clone()).await {
+                Ok(Some(resp)) => responses.push(resp),
+                Ok(None) => {}
+                Err(_) => {
+                    failed_messages.push(msg);
+                }
             }
         }
-        Ok(if responses.is_empty() {
+        let responses = if responses.is_empty() {
             None
         } else {
             Some(responses)
-        })
+        };
+        Ok((responses, failed_messages))
     }
 
     async fn flush(&self) -> anyhow::Result<()> {

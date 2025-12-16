@@ -39,24 +39,37 @@ impl MessagePublisher for MetricsPublisher {
         let result = self.inner.send(message).await;
         let duration = start.elapsed();
 
-        metrics::counter!("hot_queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(1);
-        metrics::histogram!("hot_queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(duration.as_secs_f64());
+        if result.is_ok() {
+            metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(1);
+            metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(duration.as_secs_f64());
+        }
 
         result
     }
-
     async fn send_bulk(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<Option<Vec<CanonicalMessage>>> {
-        let count = messages.len() as u64;
+    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+        let total_count = messages.len();
         let start = Instant::now();
         let result = self.inner.send_bulk(messages).await;
         let duration = start.elapsed();
 
-        metrics::counter!("hot_queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(count);
-        metrics::histogram!("hot_queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(duration.as_secs_f64());
-
+        match &result {
+            Ok((_, failed)) => {
+                let successful_count = total_count - failed.len();
+                if successful_count > 0 {
+                    let avg_duration = duration.as_secs_f64() / successful_count as f64;
+                    metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(successful_count as u64);
+                    metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(avg_duration);
+                }
+                // We can add a new metric for failures here if desired
+            }
+            Err(_) => {
+                // On a total failure, we could increment an error counter for the whole batch
+                // For now, we just don't record success, which is implicitly correct.
+            }
+        }
         result
     }
 
@@ -94,8 +107,8 @@ impl MessageConsumer for MetricsConsumer {
         let duration = start.elapsed();
 
         if result.is_ok() {
-            metrics::counter!("hot_queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(1);
-            metrics::histogram!("hot_queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(duration.as_secs_f64());
+            metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(1);
+            metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(duration.as_secs_f64());
         }
 
         result
@@ -107,8 +120,11 @@ impl MessageConsumer for MetricsConsumer {
         let duration = start.elapsed();
 
         if let Ok((messages, _)) = &result {
-            metrics::counter!("hot_queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(messages.len() as u64);
-            metrics::histogram!("hot_queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(duration.as_secs_f64());
+            if !messages.is_empty() {
+                let avg_duration = duration.as_secs_f64() / messages.len() as f64;
+                metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(messages.len() as u64);
+                metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(avg_duration);
+            }
         }
 
         result

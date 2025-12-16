@@ -32,6 +32,10 @@ fn default_concurrency() -> usize {
     1
 }
 
+fn default_dlq_retry_attempts() -> usize {
+    3
+}
+
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
 #[derive(Debug, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -188,6 +192,9 @@ pub struct MetricsMiddleware {}
 #[serde(deny_unknown_fields)]
 pub struct DeadLetterQueueMiddleware {
     pub endpoint: Endpoint,
+    /// Number of retry attempts for the DLQ send. Defaults to 3.
+    #[serde(default = "default_dlq_retry_attempts")]
+    pub dlq_retry_attempts: usize,
 }
 
 // --- Kafka Specific Configuration ---
