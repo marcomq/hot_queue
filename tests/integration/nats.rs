@@ -54,7 +54,7 @@ pub async fn test_nats_performance_direct() {
         let subject = format!("{}.direct", stream_name);
         let config = hot_queue::models::NatsConfig {
             url: "nats://localhost:4222".to_string(),
-            await_ack: true,
+            skip_ack: false,
             ..Default::default()
         };
 

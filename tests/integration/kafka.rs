@@ -59,7 +59,7 @@ pub async fn test_kafka_performance_direct() {
                 ("acks".to_string(), "1".to_string()), // Wait for leader ack, a good balance
                 ("compression.type".to_string(), "snappy".to_string()), // Use snappy compression
             ]),
-            await_ack: false, // Use "fire-and-forget" for high throughput
+            skip_ack: true, // Use "fire-and-forget" for high throughput
             ..Default::default()
         };
 

@@ -21,7 +21,7 @@ pub struct AmqpPublisher {
     exchange: String,
     routing_key: String,
     persistent: bool,
-    await_ack: bool,
+    skip_ack: bool,
 }
 
 impl AmqpPublisher {
@@ -51,7 +51,7 @@ impl AmqpPublisher {
             exchange: "".to_string(), // Default exchange
             routing_key: routing_key.to_string(),
             persistent: config.persistent,
-            await_ack: config.await_ack,
+            skip_ack: config.skip_ack,
         })
     }
 
@@ -61,7 +61,7 @@ impl AmqpPublisher {
             exchange: self.exchange.clone(),
             routing_key: routing_key.to_string(),
             persistent: self.persistent,
-            await_ack: self.await_ack,
+            skip_ack: self.skip_ack,
         }
     }
 }
@@ -99,7 +99,7 @@ impl MessagePublisher for AmqpPublisher {
             )
             .await?;
 
-        if self.await_ack {
+        if !self.skip_ack {
             // Wait for the broker's publisher confirmation.
             confirmation.await?;
         }

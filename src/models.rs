@@ -223,8 +223,9 @@ pub struct KafkaConfig {
     pub password: Option<String>, // Consider using a secret management type
     #[serde(default)]
     pub tls: TlsConfig,
+    /// If true, do not wait for an acknowledgement from the broker. Defaults to false.
     #[serde(default)]
-    pub await_ack: bool,
+    pub skip_ack: bool,
     #[serde(default)]
     pub producer_options: Option<Vec<(String, String)>>,
     #[serde(default)]
@@ -253,8 +254,9 @@ pub struct NatsConfig {
     pub token: Option<String>,
     #[serde(default)]
     pub tls: TlsConfig,
+    /// If true, do not wait for an acknowledgement from the broker. Defaults to false.
     #[serde(default)]
-    pub await_ack: bool,
+    pub skip_ack: bool,
     /// If no_jetstream: true, use Core NATS (fire-and-forget) instead of JetStream. Defaults to false.
     #[serde(default)]
     pub no_jetstream: bool,
@@ -290,8 +292,9 @@ pub struct AmqpConfig {
     pub tls: TlsConfig,
     #[serde(default = "default_amqp_persistent")]
     pub persistent: bool,
+    /// If true, do not wait for an acknowledgement from the broker. Defaults to false.
     #[serde(default)]
-    pub await_ack: bool,
+    pub skip_ack: bool,
 }
 
 fn default_amqp_persistent() -> bool {

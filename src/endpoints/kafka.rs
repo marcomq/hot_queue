@@ -23,7 +23,7 @@ use tracing::info;
 pub struct KafkaPublisher {
     producer: FutureProducer,
     topic: String,
-    await_ack: bool,
+    skip_ack: bool,
 }
 
 impl KafkaPublisher {
@@ -105,7 +105,7 @@ impl KafkaPublisher {
         Ok(Self {
             producer,
             topic: topic.to_string(),
-            await_ack: config.await_ack,
+            skip_ack: config.skip_ack,
         })
     }
 
@@ -113,7 +113,7 @@ impl KafkaPublisher {
         Self {
             producer: self.producer.clone(),
             topic: topic.to_string(),
-            await_ack: self.await_ack,
+            skip_ack: self.skip_ack,
         }
     }
 }
@@ -156,7 +156,7 @@ impl MessagePublisher for KafkaPublisher {
         };
         record = record.key(&key);
 
-        if self.await_ack {
+        if !self.skip_ack {
             // Await the delivery report from Kafka, providing at-least-once guarantees per message.
             self.producer
                 .send(record, Duration::from_secs(0))
