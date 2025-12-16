@@ -11,7 +11,8 @@ mod integration;
 async fn test_memory_to_memory_pipeline() {
     integration::common::setup_logging();
 
-    let num_messages = 1500_000;
+    println!("--- Generating Test messages ---");
+    let num_messages = 10_500_000;
     let messages_to_send = integration::common::generate_test_messages(num_messages);
 
     let route = Route {

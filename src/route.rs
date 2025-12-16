@@ -100,9 +100,8 @@ impl Route {
         name: &str,
         shutdown_rx: async_channel::Receiver<()>,
     ) -> anyhow::Result<bool> {
-        let publisher =
-            Arc::new(create_publisher_from_route(name, &self.output.endpoint_type).await?);
-        let mut consumer = create_consumer_from_route(name, &self.input.endpoint_type).await?;
+        let publisher = create_publisher_from_route(name, &self.output).await?;
+        let mut consumer = create_consumer_from_route(name, &self.input).await?;
 
         const BATCH_SIZE: usize = 128;
         loop {
@@ -138,9 +137,8 @@ impl Route {
         name: &str,
         shutdown_rx: async_channel::Receiver<()>,
     ) -> anyhow::Result<bool> {
-        let publisher =
-            Arc::new(create_publisher_from_route(name, &self.output.endpoint_type).await?);
-        let mut consumer = create_consumer_from_route(name, &self.input.endpoint_type).await?;
+        let publisher = create_publisher_from_route(name, &self.output).await?;
+        let mut consumer = create_consumer_from_route(name, &self.input).await?;
         let (err_tx, err_rx) = bounded(1); // For critical, route-stopping errors
                                            // channel capacity: a small buffer proportional to concurrency
         const BATCH_SIZE: usize = 128;

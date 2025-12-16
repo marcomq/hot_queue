@@ -3,7 +3,10 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{MapAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 use std::collections::HashMap;
 
 use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
@@ -30,22 +33,72 @@ fn default_concurrency() -> usize {
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     /// (Optional) A list of middlewares to apply to the endpoint.
     #[serde(default)]
-    pub middlewares: Middlewares,
+    pub middlewares: Vec<Middleware>,
 
     /// The specific endpoint implementation, determined by the configuration key (e.g., "kafka", "nats").
     #[serde(flatten)]
     pub endpoint_type: EndpointType,
 }
 
+impl<'de> Deserialize<'de> for Endpoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct EndpointVisitor;
+
+        impl<'de> Visitor<'de> for EndpointVisitor {
+            type Value = Endpoint;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a map representing an endpoint")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                // Buffer the map into a temporary serde_json::Map.
+                // This allows us to separate the `middlewares` field from the rest.
+                let mut temp_map = serde_json::Map::new();
+                let mut middlewares_val = None;
+
+                while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    if key == "middlewares" {
+                        middlewares_val = Some(value);
+                    } else {
+                        temp_map.insert(key, value);
+                    }
+                }
+
+                // Deserialize the rest of the map into the flattened EndpointType.
+                let endpoint_type: EndpointType =
+                    serde_json::from_value(serde_json::Value::Object(temp_map))
+                        .map_err(serde::de::Error::custom)?;
+
+                // Deserialize the extracted middlewares value using the existing helper logic.
+                let middlewares = match middlewares_val {
+                    Some(val) => deserialize_middlewares_from_value(val)
+                        .map_err(serde::de::Error::custom)?,
+                    None => Vec::new(),
+                };
+                Ok(Endpoint { middlewares, endpoint_type })
+            }
+        }
+
+        deserializer.deserialize_map(EndpointVisitor)
+    }
+}
+
 impl Endpoint {
     pub fn new(endpoint_type: EndpointType) -> Self {
         Self {
-            middlewares: Middlewares::default(),
+            middlewares: Vec::new(),
             endpoint_type,
         }
     }
@@ -54,6 +107,39 @@ impl Endpoint {
             EndpointType::Memory(cfg) => Ok(get_or_create_channel(cfg)),
             _ => Err(anyhow::anyhow!("channel() called on non-memory Endpoint")),
         }
+    }
+}
+
+/// Helper to deserialize middlewares from a generic serde_json::Value.
+/// This logic was extracted from `deserialize_middlewares_from_map_or_seq`
+/// to be reused by the custom `Endpoint` deserializer.
+fn deserialize_middlewares_from_value(value: serde_json::Value) -> Result<Vec<Middleware>, String>
+where
+{
+    match value {
+        // This is the case for YAML, which provides a clean sequence.
+        serde_json::Value::Array(arr) => serde_json::from_value(serde_json::Value::Array(arr))
+            .map_err(|e| e.to_string()),
+        // This is the case for environment variables, which `config` turns into a map.
+        // It also handles the map format from YAML.
+        // Since we now enforce sequences for YAML, this branch is primarily for env vars.
+        serde_json::Value::Object(obj) => {
+            // The config crate can produce maps with numeric string keys ("0", "1", ...)
+            // from environment variables. We need to sort by these keys to maintain order.
+            let mut middlewares: Vec<_> = obj
+                .into_iter()
+                // The map is {"0": ..., "1": ...}, so we sort by the numeric key
+                // to preserve the order defined in the environment variables.
+                .filter_map(|(k, v)| k.parse::<usize>().ok().map(|i| (i, v)))
+                .collect();
+
+            middlewares.sort_by_key(|(k, _)| *k);
+
+            let sorted_values = middlewares.into_iter().map(|(_, v)| v).collect();
+            serde_json::from_value(serde_json::Value::Array(sorted_values))
+                .map_err(|e| e.to_string())
+        }
+        _ => Err("Expected middlewares to be a sequence or a map".to_string()),
     }
 }
 
@@ -74,17 +160,13 @@ pub enum EndpointType {
     Http(HttpEndpoint),
 }
 
-/// Configuration for middlewares applied to an endpoint.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-#[serde(deny_unknown_fields)]
-pub struct Middlewares {
-    #[serde(default)]
-    pub deduplication: Option<DeduplicationMiddleware>,
-    #[serde(default)]
-    pub metrics: Option<MetricsMiddleware>,
-    #[serde(default)]
-    pub dlq: Option<DeadLetterQueueMiddleware>,
-    // Other middlewares like retry can be added here.
+/// An enumeration of all supported middleware types.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum Middleware {
+    Deduplication(DeduplicationMiddleware),
+    Metrics(MetricsMiddleware),
+    Dlq(DeadLetterQueueMiddleware),
 }
 
 /// Deduplication middleware configuration.
@@ -105,8 +187,7 @@ pub struct MetricsMiddleware {}
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct DeadLetterQueueMiddleware {
-    #[serde(flatten)]
-    pub endpoint: EndpointType,
+    pub endpoint: Endpoint,
 }
 
 // --- Kafka Specific Configuration ---
@@ -286,21 +367,22 @@ impl TlsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use config::{Config as ConfigBuilder, Environment, File, FileFormat};
+    use config::{Config as ConfigBuilder, Environment};
 
     const TEST_YAML: &str = r#"
 kafka_to_nats:
   concurrency: 10
   input:
     middlewares:
-      deduplication:
-        sled_path: "/tmp/hot_queue/dedup_db"
-        ttl_seconds: 3600
-      metrics: {}
-      dlq:
-        nats:
-          subject: "dlq-subject"
-          url: "nats://localhost:4222"
+      - deduplication:
+          sled_path: "/tmp/hot_queue/dedup_db"
+          ttl_seconds: 3600
+      - metrics: {}
+      - dlq:
+          endpoint:
+            nats:
+              subject: "dlq-subject"
+              url: "nats://localhost:4222"
     kafka:
       topic: "input-topic"
       brokers: "localhost:9092"
@@ -313,6 +395,8 @@ kafka_to_nats:
         cert_password: "password"
         accept_invalid_certs: true
   output:
+    middlewares:
+      - metrics: {}
     nats:
       subject: "output-subject"
       url: "nats://localhost:4222"
@@ -326,16 +410,30 @@ kafka_to_nats:
 
         // --- Assert Input ---
         let input = &route.input;
-        assert!(input.middlewares.metrics.is_some());
-        let dedup = input.middlewares.deduplication.as_ref().unwrap();
-        assert_eq!(dedup.sled_path, "/tmp/hot_queue/dedup_db");
-        assert_eq!(dedup.ttl_seconds, 3600);
+        assert_eq!(input.middlewares.len(), 3);
 
-        if let EndpointType::Nats(dlq_nats) = &input.middlewares.dlq.as_ref().unwrap().endpoint {
-            assert_eq!(dlq_nats.subject, Some("dlq-subject".to_string()));
-            assert_eq!(dlq_nats.config.url, "nats://localhost:4222");
-        } else {
-            panic!("DLQ endpoint should be NATS");
+        let mut has_dedup = false;
+        let mut has_metrics = false;
+        let mut has_dlq = false;
+        for middleware in &input.middlewares {
+            match middleware {
+                Middleware::Deduplication(dedup) => {
+                    assert_eq!(dedup.sled_path, "/tmp/hot_queue/dedup_db");
+                    assert_eq!(dedup.ttl_seconds, 3600);
+                    has_dedup = true;
+                }
+                Middleware::Metrics(_) => {
+                    has_metrics = true;
+                }
+                Middleware::Dlq(dlq) => {
+                    assert!(dlq.endpoint.middlewares.is_empty());
+                    if let EndpointType::Nats(nats_cfg) = &dlq.endpoint.endpoint_type {
+                        assert_eq!(nats_cfg.subject, Some("dlq-subject".to_string()));
+                        assert_eq!(nats_cfg.config.url, "nats://localhost:4222");
+                    }
+                    has_dlq = true;
+                }
+            }
         }
 
         if let EndpointType::Kafka(kafka) = &input.endpoint_type {
@@ -349,23 +447,31 @@ kafka_to_nats:
         } else {
             panic!("Input endpoint should be Kafka");
         }
+        assert!(has_dedup);
+        assert!(has_metrics);
+        assert!(has_dlq);
 
         // --- Assert Output ---
         let output = &route.output;
+        assert_eq!(output.middlewares.len(), 1);
+        assert!(matches!(output.middlewares[0], Middleware::Metrics(_)));
+
         if let EndpointType::Nats(nats) = &output.endpoint_type {
             assert_eq!(nats.subject, Some("output-subject".to_string()));
             assert_eq!(nats.config.url, "nats://localhost:4222");
         } else {
             panic!("Output endpoint should be NATS");
         }
+
     }
 
     #[test]
     fn test_deserialize_from_yaml() {
-        let builder =
-            ConfigBuilder::builder().add_source(File::from_str(TEST_YAML, FileFormat::Yaml));
-
-        let config: Config = builder.build().unwrap().try_deserialize().unwrap();
+        // We use serde_yaml directly here because the `config` crate's processing
+        // can interfere with complex deserialization logic.
+        let result: Result<Config, _> = serde_yaml_ng::from_str(TEST_YAML);
+        println!("Deserialized from YAML: {:#?}", result);
+        let config = result.expect("Failed to deserialize TEST_YAML");
         assert_config_values(&config);
     }
 
@@ -395,11 +501,11 @@ kafka_to_nats:
                 "nats://localhost:4222",
             );
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__MIDDLEWARES__DLQ__NATS__SUBJECT",
+                "HQ__KAFKA_TO_NATS__INPUT__MIDDLEWARES__0__DLQ__ENDPOINT__NATS__SUBJECT",
                 "dlq-subject",
             );
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__MIDDLEWARES__DLQ__NATS__URL",
+                "HQ__KAFKA_TO_NATS__INPUT__MIDDLEWARES__0__DLQ__ENDPOINT__NATS__URL",
                 "nats://localhost:4222",
             );
         }
@@ -423,6 +529,16 @@ kafka_to_nats:
         if let EndpointType::Kafka(k) = &config.get("kafka_to_nats").unwrap().input.endpoint_type {
             assert_eq!(k.topic, Some("input-topic".to_string()));
             assert!(k.config.tls.required);
+        } else {
+            panic!("Expected Kafka endpoint");
+        }
+
+        let input = &config.get("kafka_to_nats").unwrap().input;
+        assert_eq!(input.middlewares.len(), 1);
+        if let Middleware::Dlq(_) = &input.middlewares[0] {
+            // Correctly parsed
+        } else {
+            panic!("Expected DLQ middleware");
         }
     }
 }

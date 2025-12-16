@@ -8,6 +8,7 @@ pub mod endpoints;
 pub mod models;
 pub mod route;
 pub mod traits;
+pub mod middleware;
 
 pub use canonical_message::CanonicalMessage;
 pub use models::Route;
