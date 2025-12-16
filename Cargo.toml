@@ -22,7 +22,7 @@ tokio-rustls = { version = "0.26", optional = true }
 rustls-pemfile = { version = "2.2", optional = true }
 
 # Metrics
-metrics = { version = "0.24" }
+metrics = { version = "0.24", optional = true }
 
 # Storage for Deduplication
 sled = { version = "0.34", optional = true }
@@ -58,17 +58,13 @@ url = { version = "2.5", optional = true }
 async-channel = { version = "2.5.0" }
 once_cell = { version = "1.21.3"  }
 
-# Environment Variable Support
-dotenvy = { version = "0.15", optional = true }
-
 [features]
 default = ["full"]
-core = ["dedup", "dotenv"]
-full = ["core", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "file"]
+full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "file", "metrics", "dedup"]
 
 # Functionality features
 dedup = ["sled"]
-dotenv = ["dotenvy"]
+metrics = ["dep:metrics"]
 
 
 # Endpoint features

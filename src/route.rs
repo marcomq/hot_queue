@@ -196,6 +196,7 @@ impl Route {
                     debug!("Received a batch of {} messages concurrently", messages.len());
                     if work_tx.send((messages, commit)).await.is_err() {
                         warn!("Work channel closed, cannot process more messages concurrently. Shutting down.");
+                        break;
                     }
                 }
             }
