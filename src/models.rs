@@ -175,7 +175,7 @@ pub enum EndpointType {
 pub enum Middleware {
     Deduplication(DeduplicationMiddleware),
     Metrics(MetricsMiddleware),
-    Dlq(DeadLetterQueueMiddleware),
+    Dlq(Box<DeadLetterQueueMiddleware>),
 }
 
 /// Deduplication middleware configuration.

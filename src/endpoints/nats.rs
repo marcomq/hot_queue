@@ -97,7 +97,7 @@ impl MessagePublisher for NatsPublisher {
         match &self.client {
             NatsClient::JetStream(jetstream) => {
                 let ack_future = jetstream
-                    .publish_with_headers(self.subject.clone(), headers, message.payload.into())
+                    .publish_with_headers(self.subject.clone(), headers, message.payload)
                     .await?;
 
                 if !self.skip_ack {
@@ -106,7 +106,7 @@ impl MessagePublisher for NatsPublisher {
             }
             NatsClient::Core(client) => {
                 client
-                    .publish_with_headers(self.subject.clone(), headers, message.payload.into())
+                    .publish_with_headers(self.subject.clone(), headers, message.payload)
                     .await?;
             }
         }
@@ -131,7 +131,7 @@ impl MessagePublisher for NatsPublisher {
 
 enum NatsSubscription {
     Core(async_nats::Subscriber),
-    JetStream(jetstream::consumer::pull::Stream),
+    JetStream(Box<jetstream::consumer::pull::Stream>),
 }
 
 pub struct NatsConsumer {
@@ -180,7 +180,7 @@ impl NatsConsumer {
 
             let stream = consumer.messages().await?;
             info!(stream = %stream_name, subject = %subject, "NATS JetStream source subscribed");
-            NatsSubscription::JetStream(stream)
+            NatsSubscription::JetStream(Box::new(stream))
         } else {
             info!(subject = %subject, "NATS consumer is in Core mode (non-persistent).");
             // For Core NATS, we use a queue group to load-balance messages.

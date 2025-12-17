@@ -123,7 +123,7 @@ impl Route {
                             commit(response).await; // Commit the successful messages
                             return Err(anyhow::anyhow!("Failed to send {} messages", failed.len()));
                         }
-                        Err(e) => return Err(e.into()), // Propagate error to trigger reconnect
+                        Err(e) => return Err(e), // Propagate error to trigger reconnect
                     }
                 }
             }

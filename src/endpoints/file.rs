@@ -117,7 +117,7 @@ impl MessageConsumer for FileConsumer {
         }
 
         // Trim the newline character that read_until includes
-        if buffer.ends_with(&[b'\n']) {
+        if buffer.ends_with(b"\n") {
             buffer.pop();
         }
         let message = CanonicalMessage::new(buffer);
