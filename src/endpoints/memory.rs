@@ -3,7 +3,7 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
 use crate::models::MemoryConfig;
-use crate::traits::{BoxFuture, BulkCommitFunc, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{BoxFuture, BulkCommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_channel::{bounded, Receiver, Sender};
@@ -68,7 +68,7 @@ impl MemoryChannel {
         messages
     }
 
-    /// Returns the number of messages currently in the channel.
+    /// Returns the number of bulk messages in the channel.
     pub fn len(&self) -> usize {
         self.receiver.len()
     }
@@ -116,19 +116,6 @@ impl MemoryPublisher {
 
 #[async_trait]
 impl MessagePublisher for MemoryPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        self.sender
-            .send(vec![message])
-            .await
-            .map_err(|e| anyhow!("Failed to send to memory channel: {}", e))?;
-
-        tracing::trace!(
-            "Message sent to publisher memory channel {}",
-            self.sender.len()
-        );
-        Ok(None)
-    }
-
     async fn send_bulk(
         &self,
         messages: Vec<CanonicalMessage>,
@@ -178,45 +165,31 @@ impl MemoryConsumer {
 
 #[async_trait]
 impl MessageConsumer for MemoryConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        // If the buffer is empty, await a new batch from the channel.
-        if self.buffer.is_empty() {
-            let batch = self
-                .receiver
-                .recv()
-                .await
-                .map_err(|_| anyhow!("Memory channel closed."))?;
-            self.buffer = batch;
-        }
-
-        // Pop a message from the buffer. This will panic if empty, but the logic above prevents that.
-        let message = self.buffer.remove(0);
-        let commit = Box::new(|_| Box::pin(async move {}) as BoxFuture<'static, ()>);
-        Ok((message, commit))
-    }
-
     async fn receive_bulk(
         &mut self,
         max_messages: usize,
     ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
         // If the internal buffer has messages, return them first.
         if self.buffer.is_empty() {
-            // Buffer is empty, so wait for a new batch from the channel.
+            // Buffer is empty. Wait for a new batch from the channel.
             self.buffer = self
                 .receiver
                 .recv()
                 .await
                 .map_err(|_| anyhow!("Memory channel closed."))?;
+            // Reverse the buffer so we can efficiently pop from the end.
+            self.buffer.reverse();
         }
 
-        // If we got more messages than requested, split off the excess and store back in buffer.
-        let messages = if self.buffer.len() > max_messages {
-            self.buffer.split_off(max_messages)
-        }
-        // Ensure buffer is empty if we're returning all messages.
-        else {
-            std::mem::take(&mut self.buffer)
-        };
+        // Determine the number of messages to take from the buffer.
+        let num_to_take = self.buffer.len().min(max_messages);
+        let split_at = self.buffer.len() - num_to_take;
+
+        // `split_off` is highly efficient. It splits the Vec in two at the given
+        // index and returns the part after the index, leaving the first part.
+        let mut messages = self.buffer.split_off(split_at);
+        messages.reverse(); // Reverse back to original order.
+
         let commit = Box::new(|_| Box::pin(async move {}) as BoxFuture<'static, ()>);
         Ok((messages, commit))
     }
@@ -246,14 +219,12 @@ mod tests {
         let msg = CanonicalMessage::from_json(json!({"hello": "memory"})).unwrap();
 
         // Send a message via the publisher
-        // Send a message via the publisher
         publisher.send(msg.clone()).await.unwrap();
 
         sleep(std::time::Duration::from_millis(10)).await;
         // Receive it with the consumer
         let (received_msg, commit) = consumer.receive().await.unwrap();
         commit(None).await;
-
         assert_eq!(received_msg.payload, msg.payload);
         assert_eq!(consumer.channel().len(), 0);
     }
@@ -269,10 +240,11 @@ mod tests {
 
         let msg1 = CanonicalMessage::from_json(json!({"message": "one"})).unwrap();
         let msg2 = CanonicalMessage::from_json(json!({"message": "two"})).unwrap();
+        let msg3 = CanonicalMessage::from_json(json!({"message": "three"})).unwrap();
 
         // 3. Send messages via the publisher
-        publisher.send(msg1.clone()).await.unwrap();
-        publisher.send(msg2.clone()).await.unwrap();
+        publisher.send_bulk(vec![msg1.clone(), msg2.clone()]).await.unwrap();
+        publisher.send(msg3.clone()).await.unwrap();
 
         // 4. Verify the channel has the messages
         assert_eq!(publisher.channel().len(), 2);
@@ -282,9 +254,13 @@ mod tests {
         commit1(None).await;
         assert_eq!(received_msg1.payload, msg1.payload);
 
-        let (received_msg2, commit2) = consumer.receive().await.unwrap();
+        let (received_msg2, commit2) = consumer.receive_bulk(1).await.unwrap();
         commit2(None).await;
-        assert_eq!(received_msg2.payload, msg2.payload);
+        assert_eq!(received_msg2.len(), 1);
+        assert_eq!(received_msg2.get(0).unwrap().payload, msg2.payload);
+        let (received_msg3, commit3) = consumer.receive_bulk(2).await.unwrap();
+        commit3(None).await;
+        assert_eq!(received_msg3.get(0).unwrap().payload, msg3.payload);
 
         // 6. Verify that the channel is now empty
         assert_eq!(publisher.channel().len(), 0);

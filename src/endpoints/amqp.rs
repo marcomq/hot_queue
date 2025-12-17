@@ -1,5 +1,5 @@
 use crate::models::AmqpConfig;
-use crate::traits::{BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{BoxFuture, BulkCommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -104,6 +104,15 @@ impl MessagePublisher for AmqpPublisher {
             confirmation.await?;
         }
         Ok(None)
+    }
+
+    // This isn't a real bulk send, but the normal send is fast enough.
+    async fn send_bulk(&self,
+        messages: Vec<CanonicalMessage>,
+    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+        crate::traits::send_bulk_helper(self, messages, |publisher, message| {
+            Box::pin(publisher.send(message))
+        }).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -214,8 +223,7 @@ async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig>
 
 #[async_trait]
 impl MessageConsumer for AmqpConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        let delivery = futures::StreamExt::next(&mut self.consumer)
+    async fn receive_bulk(&mut self, _max_messages: usize) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {        let delivery = futures::StreamExt::next(&mut self.consumer)
             .await
             .ok_or_else(|| anyhow!("AMQP consumer stream ended"))??;
 
@@ -251,7 +259,7 @@ impl MessageConsumer for AmqpConsumer {
             }) as BoxFuture<'static, ()>
         });
 
-        Ok((message, commit))
+        Ok((vec![message], crate::traits::into_bulk_commit_func(commit)))
     }
 
     fn as_any(&self) -> &dyn Any {

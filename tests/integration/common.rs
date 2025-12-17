@@ -1,13 +1,14 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
 use chrono;
-use hot_queue::traits::MessagePublisher;
+use hot_queue::traits::{BulkCommitFunc, MessagePublisher};
 use hot_queue::traits::{CommitFunc, MessageConsumer};
 use hot_queue::{CanonicalMessage, Route};
 use serde_json::json;
 use std::any::Any;
 use std::fmt::Display;
 use std::process::Command;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
@@ -272,24 +273,37 @@ pub async fn measure_write_performance(
     for _ in 0..concurrency {
         let rx_clone = rx.clone();
         let publisher_clone = publisher.clone();
+        let batch_size = (num_messages / concurrency / 10).max(100); // Define a reasonable batch size
+
         tasks.spawn(async move {
-            while let Ok(message) = rx_clone.recv().await {
-                // Loop to retry sending the message in case of backpressure.
-                // This is common with async clients like rumqttc where the internal
-                // buffer can fill up under high load.
-                let mut first_try = true;
-                loop {
-                    let res = publisher_clone.send(message.clone()).await;
-                    if let Err(e) = res {
-                        if first_try {
-                            eprintln!("Error sending message: {}", e);
-                        }
-                        first_try = false;
+            loop {
+                // Wait for the first message to start a batch.
+                let first_message = match rx_clone.recv().await {
+                    Ok(msg) => msg,
+                    Err(_) => break, // Channel is closed and empty, so we're done.
+                };
+
+                let mut batch = Vec::with_capacity(batch_size);
+                batch.push(first_message);
+
+                // Greedily fill the rest of the batch without waiting.
+                for _ in 1..batch_size {
+                    if let Ok(msg) = rx_clone.try_recv() {
+                        batch.push(msg);
                     } else {
-                        break;
+                        break; // Channel is empty for now.
                     }
-                    // Backpressure detected, yield and retry.
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+
+                // Retry sending the batch if some messages fail.
+                let mut messages_to_send = batch;
+                loop {
+                    match publisher_clone.send_bulk(messages_to_send.clone()).await {
+                        Ok((_, failed)) if failed.is_empty() => break, // All sent successfully
+                        Ok((_, failed)) => messages_to_send = failed, // Retry failed messages
+                        Err(e) => eprintln!("Error sending bulk messages: {}", e),
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await; // Backoff before retry
                 }
             }
         });
@@ -321,6 +335,14 @@ impl MessageConsumer for MockConsumer {
         tokio::time::sleep(Duration::from_secs(3600)).await;
         unreachable!();
     }
+    async fn receive_bulk(&mut self,
+        _max_messages: usize,
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+        // This consumer will block forever, which is fine for tests that only need a publisher.
+        // It prevents the route from exiting immediately.
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        unreachable!();
+    }
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -336,12 +358,16 @@ pub async fn measure_read_performance(
     println!("\n--- Measuring Read Performance for {} ---", name);
     let messages_to_receive = Arc::new(tokio::sync::Semaphore::new(num_messages));
     let start_time = Instant::now();
+    let final_count = Arc::new(AtomicUsize::new(0));
+
 
     let mut tasks = tokio::task::JoinSet::new();
+    let batch_size = (num_messages / concurrency / 10).max(100);
 
     for _ in 0..concurrency {
         let consumer_clone = consumer.clone();
         let semaphore_clone = messages_to_receive.clone();
+        let final_count_clone = Arc::clone(&final_count);
 
         tasks.spawn(async move {
             loop {
@@ -356,10 +382,11 @@ pub async fn measure_read_performance(
                     break;
                 }
 
-                match consumer_clone.lock().await.receive().await {
-                    Ok((_, commit)) => {
+                match consumer_clone.lock().await.receive_bulk(batch_size).await {
+                    Ok((msgs, commit)) => {
                         // Spawn the commit to a separate task to allow the worker
                         // to immediately start receiving the next message.
+                        final_count_clone.fetch_add(msgs.len(), std::sync::atomic::Ordering::Relaxed);
                         tokio::spawn(async move {
                             commit(None).await;
                         });
@@ -376,7 +403,12 @@ pub async fn measure_read_performance(
     while tasks.join_next().await.is_some() {}
 
     let duration: Duration = start_time.elapsed();
-    let msgs_per_sec = num_messages as f64 / duration.as_secs_f64();
+    // Use the actual number of messages received for calculation, in case of under-delivery.
+    let msgs_per_sec = if duration.as_secs_f64() > 0.0 {
+        final_count.load(std::sync::atomic::Ordering::Relaxed) as f64 / duration.as_secs_f64()
+    } else {
+        0.0
+    };
 
     println!(
         "  Read {} messages in {:.2?} ({} msgs/sec)",

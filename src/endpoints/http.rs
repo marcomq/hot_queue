@@ -4,7 +4,7 @@
 //  git clone https://github.com/marcomq/hot_queue
 
 use crate::models::HttpConfig;
-use crate::traits::{BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{BoxFuture, BulkCommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -92,8 +92,7 @@ impl HttpConsumer {
 
 #[async_trait]
 impl MessageConsumer for HttpConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        let (message, response_tx) = self
+    async fn receive_bulk(&mut self, _max_messages: usize) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {        let (message, response_tx) = self
             .request_rx
             .recv()
             .await
@@ -108,7 +107,7 @@ impl MessageConsumer for HttpConsumer {
             }) as BoxFuture<'static, ()>
         });
 
-        Ok((message, commit))
+        Ok((vec![message], crate::traits::into_bulk_commit_func(commit)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -252,6 +251,15 @@ impl MessagePublisher for HttpPublisher {
         } else {
             Ok(None)
         }
+    }
+
+    // not a real bulk, but fast enough
+    async fn send_bulk(&self,
+        messages: Vec<CanonicalMessage>,
+    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+        crate::traits::send_bulk_helper(self, messages, |publisher, message| {
+            Box::pin(publisher.send(message))
+        }).await
     }
 
     fn as_any(&self) -> &dyn Any {

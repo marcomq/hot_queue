@@ -109,8 +109,8 @@ impl Route {
                     let (messages, commit) = match res {
                         Ok(val) => val,
                         Err(e) => {
-                            warn!("Consumer returned an error, likely end-of-stream: {}. Shutting down route.", e);
-                            return Ok(false); // Graceful exit on end-of-stream
+                            info!("Consumer returned an error, likely end-of-stream: {}. Shutting down route.", e);
+                            break; // Graceful exit on end-of-stream
                         }
                     };
                     debug!("Received a batch of {} messages sequentially", messages.len());
@@ -128,6 +128,7 @@ impl Route {
                 }
             }
         }
+        Ok(false) // Indicate graceful shutdown due to end-of-stream
     }
 
     /// The main concurrent runner for when concurrency > 1.

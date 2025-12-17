@@ -1,5 +1,5 @@
 use crate::models::MongoDbConfig;
-use crate::traits::{BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{BoxFuture, BulkCommitFunc, CommitFunc, MessageConsumer, MessagePublisher, into_bulk_commit_func};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -98,6 +98,14 @@ impl MessagePublisher for MongoDbPublisher {
         self.collection.insert_one(doc).await?;
 
         Ok(Some(msg_with_metadata))
+    }
+
+    async fn send_bulk(&self,
+        messages: Vec<CanonicalMessage>,
+    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+        crate::traits::send_bulk_helper(self, messages, |publisher, message| {
+            Box::pin(publisher.send(message))
+        }).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -200,6 +208,14 @@ impl MessageConsumer for MongoDbConsumer {
             }
             tokio::time::sleep(self.polling_interval).await;
         }
+    }
+
+    async fn receive_bulk(&mut self,
+        _max_messages: usize,
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+        let (msg, commit) = self.receive().await?;
+        let commit = into_bulk_commit_func(commit);
+        Ok((vec![msg], commit))
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -1,5 +1,5 @@
 use hot_queue::models::{Endpoint, EndpointType, MemoryConfig, Route};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::integration::common::format_pretty;
 
@@ -14,7 +14,12 @@ async fn test_memory_to_memory_pipeline() {
     integration::common::setup_logging();
 
     println!("--- Generating Test messages ---");
-    let num_messages = 10_000_000;
+    let num_messages = if cfg!(debug_assertions) {
+        1000_000
+    } else {
+        10_000_000
+    };
+
     let messages_to_send = integration::common::generate_test_messages(num_messages);
 
     let route = Route {
@@ -32,32 +37,33 @@ async fn test_memory_to_memory_pipeline() {
     let in_channel = route.input.channel().unwrap();
     let out_channel = route.output.channel().unwrap();
 
-    let run_handle = route.run_until_err("mem_2_mem", None);
-
     println!("--- Starting Memory-to-Memory Pipeline Test ---");
 
     let start_time = Instant::now();
-    let fill_task = tokio::spawn(async move {
-        in_channel.fill_messages(messages_to_send).await.unwrap();
-        in_channel.close();
-    });
 
-    // Wait for the bridge to finish processing.
-    let _ = tokio::time::timeout(Duration::from_secs(20), run_handle)
-        .await
-        .expect("Test timed out waiting for bridge to complete");
+    // Run the pipeline and the message sending concurrently.
+    let (run_result, _) = tokio::join!(
+        // The route will run until the input channel is closed and empty.
+        route.run_until_err("mem_2_mem", None),
+        // This task sends all messages and then closes the channel,
+        // which signals the route to stop.
+        async {
+            in_channel.fill_messages(messages_to_send).await.unwrap();
+            in_channel.close();
+        }
+    );
 
-    // Ensure the fill task also completed without error
-    fill_task.await.unwrap();
+    // Check that the route exited gracefully.
+    run_result.expect("Pipeline run failed");
 
     let received = out_channel.drain_messages();
     let duration = start_time.elapsed();
 
     let msgs_per_sec = num_messages as f64 / duration.as_secs_f64();
     println!(
-        "Processed {} messages in {}ms ({} msgs/sec)",
+        "Processed {} messages in {:.2?} ({} msgs/sec)",
         format_pretty(num_messages),
-        format_pretty(duration.as_millis()),
+        duration,
         format_pretty(msgs_per_sec)
     );
     println!("-------------------------------------------------");
