@@ -3,7 +3,7 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
 
-use crate::traits::{BulkCommitFunc, MessagePublisher, BoxFuture, MessageConsumer};
+use crate::traits::{BoxFuture, BulkCommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -58,12 +58,14 @@ impl MessagePublisher for FilePublisher {
     }
 
     // just using normal send for simplicity - it is fast enough
-    async fn send_bulk(&self,
+    async fn send_bulk(
+        &self,
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
         crate::traits::send_bulk_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
-        }).await
+        })
+        .await
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
@@ -102,7 +104,11 @@ impl FileConsumer {
 #[async_trait]
 impl MessageConsumer for FileConsumer {
     #[instrument(skip(self), fields(path = %self.path), err(level = "info"))]
-    async fn receive_bulk(&mut self, _max_messages: usize) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {        let mut buffer = Vec::new();
+    async fn receive_bulk(
+        &mut self,
+        _max_messages: usize,
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+        let mut buffer = Vec::new();
 
         let bytes_read = self.reader.read_until(b'\n', &mut buffer).await?;
         if bytes_read == 0 {
@@ -151,7 +157,9 @@ mod tests {
         let msg1 = CanonicalMessage::from_json(json!({"hello": "world"})).unwrap();
         let msg2 = CanonicalMessage::from_json(json!({"foo": "bar"})).unwrap();
 
-        sink.send_bulk(vec![msg1.clone(), msg2.clone()]).await.unwrap();
+        sink.send_bulk(vec![msg1.clone(), msg2.clone()])
+            .await
+            .unwrap();
         // Explicitly flush to ensure data is written before we try to read it.
         sink.flush().await.unwrap();
         // Drop the sink to release the file lock on some OSes before the source tries to open it.

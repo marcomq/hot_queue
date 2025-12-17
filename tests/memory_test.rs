@@ -60,12 +60,23 @@ async fn test_memory_to_memory_pipeline() {
     let duration = start_time.elapsed();
 
     let msgs_per_sec = num_messages as f64 / duration.as_secs_f64();
+
+    // Print results in a table format
+    println!("\n--- Performance Test Results ---");
+    println!("{:<25} | {:<25}", "Test Name", "Pipeline Performance");
+    println!("{:-<25}-|-{:-<25}", "", "");
     println!(
-        "Processed {} messages in {:.2?} ({} msgs/sec)",
-        format_pretty(num_messages),
-        duration,
+        "{:<25} | {:<25}",
+        "Memory to Memory Pipeline",
         format_pretty(msgs_per_sec)
     );
+    println!("-------------------------------------------------");
+    println!(
+        "Processed {} messages in {:.2?}",
+        format_pretty(num_messages),
+        duration
+    );
+
     println!("-------------------------------------------------");
 
     assert_eq!(received.len(), num_messages);

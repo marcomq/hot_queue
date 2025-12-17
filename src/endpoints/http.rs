@@ -92,7 +92,11 @@ impl HttpConsumer {
 
 #[async_trait]
 impl MessageConsumer for HttpConsumer {
-    async fn receive_bulk(&mut self, _max_messages: usize) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {        let (message, response_tx) = self
+    async fn receive_bulk(
+        &mut self,
+        _max_messages: usize,
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+        let (message, response_tx) = self
             .request_rx
             .recv()
             .await
@@ -254,12 +258,14 @@ impl MessagePublisher for HttpPublisher {
     }
 
     // not a real bulk, but fast enough
-    async fn send_bulk(&self,
+    async fn send_bulk(
+        &self,
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
         crate::traits::send_bulk_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
-        }).await
+        })
+        .await
     }
 
     fn as_any(&self) -> &dyn Any {

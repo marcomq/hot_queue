@@ -243,7 +243,10 @@ mod tests {
         let msg3 = CanonicalMessage::from_json(json!({"message": "three"})).unwrap();
 
         // 3. Send messages via the publisher
-        publisher.send_bulk(vec![msg1.clone(), msg2.clone()]).await.unwrap();
+        publisher
+            .send_bulk(vec![msg1.clone(), msg2.clone()])
+            .await
+            .unwrap();
         publisher.send(msg3.clone()).await.unwrap();
 
         // 4. Verify the channel has the messages

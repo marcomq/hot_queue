@@ -4,6 +4,7 @@ use chrono;
 use hot_queue::traits::{BulkCommitFunc, MessagePublisher};
 use hot_queue::traits::{CommitFunc, MessageConsumer};
 use hot_queue::{CanonicalMessage, Route};
+use once_cell::sync::Lazy;
 use serde_json::json;
 use std::any::Any;
 use std::fmt::Display;
@@ -19,6 +20,26 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use hot_queue::endpoints::memory::MemoryChannel;
+
+/// A struct to hold the performance results for a single test run.
+#[derive(Debug, Clone)]
+pub struct PerformanceResult {
+    pub test_name: String,
+    pub write_performance: f64,
+    pub read_performance: f64,
+}
+
+/// A global, thread-safe collector for performance results.
+static PERFORMANCE_RESULTS: Lazy<Mutex<Vec<PerformanceResult>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
+
+/// Adds a performance result to the global collector.
+pub fn add_performance_result(result: PerformanceResult) {
+    PERFORMANCE_RESULTS.lock().unwrap().push(result);
+}
+
+/// A mock struct whose Drop implementation will print the summary table.
+pub struct PerformanceSummaryPrinter;
 
 pub struct DockerCompose {
     compose_file: String,
@@ -227,6 +248,30 @@ pub fn setup_logging() {
     });
 }
 
+impl Drop for PerformanceSummaryPrinter {
+    fn drop(&mut self) {
+        let results = PERFORMANCE_RESULTS.lock().unwrap();
+        if results.is_empty() {
+            return;
+        }
+
+        println!("\n\n--- Consolidated Performance Test Results (msgs/sec) ---");
+        println!(
+            "{:<25} | {:>20} | {:>20}",
+            "Test Name", "Write Performance", "Read Performance"
+        );
+        println!("{:-<25}-|-{:->20}-|-{:->20}", "", "", "");
+        for result in results.iter() {
+            println!(
+                "{:<25} | {:>20} | {:>20}",
+                result.test_name,
+                format_pretty(result.write_performance),
+                format_pretty(result.read_performance)
+            );
+        }
+        println!("-----------------------------------------------------------------------\n");
+    }
+}
 /// A test harness that manages the lifecycle of Docker containers for a single test.
 /// It ensures that `docker-compose up` is run before the test and `docker-compose down`
 /// is run after, even if the test panics.
@@ -254,12 +299,13 @@ pub async fn measure_write_performance(
     publisher: Arc<dyn MessagePublisher>,
     num_messages: usize,
     concurrency: usize,
-) {
+) -> f64 {
     println!("\n--- Measuring Write Performance for {} ---", name);
     let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
 
     tokio::spawn(async move {
         for _ in 0..num_messages {
+            // The test will hang if the receiver is dropped, so we ignore the error.
             if tx.send(generate_message()).await.is_err() {
                 break;
             }
@@ -300,7 +346,7 @@ pub async fn measure_write_performance(
                 loop {
                     match publisher_clone.send_bulk(messages_to_send.clone()).await {
                         Ok((_, failed)) if failed.is_empty() => break, // All sent successfully
-                        Ok((_, failed)) => messages_to_send = failed, // Retry failed messages
+                        Ok((_, failed)) => messages_to_send = failed,  // Retry failed messages
                         Err(e) => eprintln!("Error sending bulk messages: {}", e),
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await; // Backoff before retry
@@ -321,6 +367,7 @@ pub async fn measure_write_performance(
         duration,
         format_pretty(msgs_per_sec)
     );
+    msgs_per_sec
 }
 
 /// A mock consumer that does nothing, useful for testing publishers in isolation.
@@ -335,7 +382,8 @@ impl MessageConsumer for MockConsumer {
         tokio::time::sleep(Duration::from_secs(3600)).await;
         unreachable!();
     }
-    async fn receive_bulk(&mut self,
+    async fn receive_bulk(
+        &mut self,
         _max_messages: usize,
     ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
         // This consumer will block forever, which is fine for tests that only need a publisher.
@@ -354,12 +402,11 @@ pub async fn measure_read_performance(
     consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
     num_messages: usize,
     concurrency: usize,
-) {
+) -> f64 {
     println!("\n--- Measuring Read Performance for {} ---", name);
     let messages_to_receive = Arc::new(tokio::sync::Semaphore::new(num_messages));
     let start_time = Instant::now();
     let final_count = Arc::new(AtomicUsize::new(0));
-
 
     let mut tasks = tokio::task::JoinSet::new();
     let batch_size = (num_messages / concurrency / 10).max(100);
@@ -386,7 +433,8 @@ pub async fn measure_read_performance(
                     Ok((msgs, commit)) => {
                         // Spawn the commit to a separate task to allow the worker
                         // to immediately start receiving the next message.
-                        final_count_clone.fetch_add(msgs.len(), std::sync::atomic::Ordering::Relaxed);
+                        final_count_clone
+                            .fetch_add(msgs.len(), std::sync::atomic::Ordering::Relaxed);
                         tokio::spawn(async move {
                             commit(None).await;
                         });
@@ -416,6 +464,7 @@ pub async fn measure_read_performance(
         duration,
         format_pretty(msgs_per_sec)
     );
+    msgs_per_sec
 }
 
 /// Formats a number with commas as thousand separators.

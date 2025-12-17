@@ -1,7 +1,9 @@
 #![allow(dead_code)]
+use crate::integration::common::PERF_TEST_CONCURRENCY;
+
 use super::common::{
-    measure_read_performance, measure_write_performance, run_performance_pipeline_test,
-    run_pipeline_test, run_test_with_docker, setup_logging, PERF_TEST_CONCURRENCY,
+    add_performance_result, measure_read_performance, measure_write_performance,
+    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker, setup_logging,
     PERF_TEST_MESSAGE_COUNT,
 };
 use hot_queue::endpoints::mqtt::{MqttConsumer, MqttPublisher};
@@ -78,7 +80,7 @@ pub async fn test_mqtt_performance_direct() {
                 .await
                 .unwrap(),
         );
-        measure_write_performance(
+        let write_perf = measure_write_performance(
             "MQTT",
             publisher.clone(),
             PERF_TEST_MESSAGE_COUNT_DIRECT,
@@ -86,22 +88,21 @@ pub async fn test_mqtt_performance_direct() {
         )
         .await;
 
-        // Explicitly disconnect the publisher to release the client ID and connection gracefully.
-        // It's possible the publisher is already disconnected due to errors during the
-        // performance test, so we don't unwrap the result.
-        // let _ = publisher.disconnect().await;
-
-        // Give the broker a moment to process the backlog of messages before the consumer connects.
-        // This helps prevent the broker from overwhelming the new consumer and dropping the connection.
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        measure_read_performance(
+        let read_perf = measure_read_performance(
             "MQTT",
             consumer,
             PERF_TEST_MESSAGE_COUNT_DIRECT,
             PERF_TEST_CONCURRENCY,
         )
         .await;
+        let _ = publisher.disconnect().await;
+        add_performance_result(super::common::PerformanceResult {
+            test_name: "MQTT Direct".to_string(),
+            write_performance: write_perf,
+            read_performance: read_perf,
+        });
     })
     .await;
 }

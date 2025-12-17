@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 use std::{sync::Arc, time::Duration};
 
+use crate::integration::common::PERF_TEST_CONCURRENCY;
+
 use super::common::{
-    measure_read_performance, measure_write_performance, run_performance_pipeline_test,
-    run_pipeline_test, run_test_with_docker, setup_logging, PERF_TEST_CONCURRENCY,
+    add_performance_result, measure_read_performance, measure_write_performance,
+    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker, setup_logging,
 };
 use hot_queue::endpoints::nats::{NatsConsumer, NatsPublisher};
 const PERF_TEST_MESSAGE_COUNT_DIRECT: usize = 20_000;
@@ -63,7 +65,7 @@ pub async fn test_nats_performance_direct() {
                 .await
                 .unwrap(),
         );
-        measure_write_performance(
+        let write_perf = measure_write_performance(
             "NATS",
             publisher,
             PERF_TEST_MESSAGE_COUNT_DIRECT,
@@ -71,20 +73,26 @@ pub async fn test_nats_performance_direct() {
         )
         .await;
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
 
         let consumer = Arc::new(tokio::sync::Mutex::new(
             NatsConsumer::new(&config, stream_name, &subject)
                 .await
                 .unwrap(),
         ));
-        measure_read_performance(
+        let read_perf = measure_read_performance(
             "NATS",
             consumer,
             PERF_TEST_MESSAGE_COUNT_DIRECT,
             PERF_TEST_CONCURRENCY,
         )
         .await;
+
+        add_performance_result(super::common::PerformanceResult {
+            test_name: "NATS Direct".to_string(),
+            write_performance: write_perf,
+            read_performance: read_perf,
+        });
     })
     .await;
 }

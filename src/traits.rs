@@ -57,11 +57,13 @@ pub trait MessageConsumer: Send + Sync {
         if let Some(msg) = msg_vec.into_iter().next() {
             Ok((msg, into_commit_func(bulk_commit)))
         } else {
-            Err(anyhow::anyhow!("Nothing received, receiver probably closed."))
+            Err(anyhow::anyhow!(
+                "Nothing received, receiver probably closed."
+            ))
         }
     }
 
-      async fn receive_bulk_helper(
+    async fn receive_bulk_helper(
         &mut self,
         _max_messages: usize,
     ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
@@ -89,11 +91,9 @@ pub trait MessagePublisher: Send + Sync + 'static {
         let (result_vec, failed_msgs) = self.send_bulk(vec![message]).await?;
         if !failed_msgs.is_empty() {
             Err(anyhow::anyhow!("Failed to send message"))
-        }
-        else if let Some(result) = result_vec {
+        } else if let Some(result) = result_vec {
             Ok(result.into_iter().next())
-        }
-        else {
+        } else {
             Ok(None)
         }
     }
@@ -109,7 +109,10 @@ pub trait MessagePublisher: Send + Sync + 'static {
 pub async fn send_bulk_helper<P: MessagePublisher + ?Sized>(
     publisher: &P,
     messages: Vec<CanonicalMessage>,
-    callback: impl for<'a> Fn(&'a P, CanonicalMessage) -> BoxFuture<'a, anyhow::Result<Option<CanonicalMessage>>>
+    callback: impl for<'a> Fn(
+            &'a P,
+            CanonicalMessage,
+        ) -> BoxFuture<'a, anyhow::Result<Option<CanonicalMessage>>>
         + Send
         + Sync,
 ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
