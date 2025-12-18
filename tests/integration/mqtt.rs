@@ -1,16 +1,13 @@
 #![allow(dead_code)]
-use crate::integration::common::PERF_TEST_CONCURRENCY;
 
 use super::common::{
-    add_performance_result, measure_read_performance, measure_write_performance,
+    add_performance_result, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker, setup_logging,
     PERF_TEST_MESSAGE_COUNT,
 };
 use hot_queue::endpoints::mqtt::{MqttConsumer, MqttPublisher};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use uuid::Uuid;
-
-const PERF_TEST_MESSAGE_COUNT_DIRECT: usize = 20_000;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_mqtt:
@@ -53,50 +50,30 @@ pub async fn test_mqtt_performance_pipeline() {
 pub async fn test_mqtt_performance_direct() {
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/mqtt.yml", || async {
-        let unique_id = Uuid::new_v4().as_simple().to_string();
-        let topic = "test_topic_mqtt/direct";
-        let publisher_id = format!("perftest-pub-{}", unique_id);
-        let consumer_id = format!("perftest-sub-{}", unique_id);
+        let topic = "perf_test_mqtt_direct";
         let config = hot_queue::models::MqttConfig {
             url: "mqtt://localhost:1883".to_string(),
             // Increase the client's incoming message buffer to hold all messages from the test run.
-            queue_capacity: Some(PERF_TEST_MESSAGE_COUNT_DIRECT),
+            queue_capacity: Some(PERF_TEST_MESSAGE_COUNT * 2), // For batch and single
             ..Default::default()
         };
 
-        // Create the consumer and subscribe before publishing messages.
-        let consumer = Arc::new(tokio::sync::Mutex::new(
-            MqttConsumer::new(&config, topic, &consumer_id)
-                .await
-                .unwrap(),
-        ));
+        let result = run_direct_perf_test(
+                "MQTT",
+                || async {
+                    let publisher_id = format!("pub-{}", Uuid::new_v4().as_simple());
+                    Arc::new(MqttPublisher::new(&config, topic, &publisher_id).await.unwrap())
+                },
+                || async {
+                    let consumer_id = format!("sub-{}", Uuid::new_v4().as_simple());
+                    Arc::new(tokio::sync::Mutex::new(
+                        MqttConsumer::new(&config, topic, &consumer_id).await.unwrap(),
+                    ))
+                },
+            )
+            .await;
 
-        // Give the consumer a moment to connect and subscribe.
-        // This helps ensure the subscription is active before messages are published.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let publisher = Arc::new(
-            MqttPublisher::new(&config, topic, &publisher_id)
-                .await
-                .unwrap(),
-        );
-        let write_perf = measure_write_performance(
-            "MQTT",
-            publisher.clone(),
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
-        )
-        .await;
-
-        tokio::time::sleep(Duration::from_secs(3)).await;
-
-        let read_perf =
-            measure_read_performance("MQTT", consumer, PERF_TEST_MESSAGE_COUNT_DIRECT).await;
-        add_performance_result(super::common::PerformanceResult {
-            test_name: "MQTT Direct".to_string(),
-            write_performance: write_perf,
-            read_performance: read_perf,
-        });
+        add_performance_result(result);
     })
     .await;
 }

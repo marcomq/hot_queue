@@ -114,19 +114,18 @@ impl KafkaPublisher {
             skip_ack: self.skip_ack,
         }
     }
+}
 
-    /// Flushes any buffered messages and disconnects the producer.
-    /// This method takes ownership to ensure it's the final action.
-    pub async fn disconnect(&self) {
-        info!(
-            topic = %self.topic,
-            "Flushing and disconnecting Kafka producer..."
-        );
-        if let Err(e) = self.producer.flush(Duration::from_secs(10)) {
-            tracing::warn!("Kafka producer flush failed during disconnect: {:?}", e);
-        }
+
+impl Drop for KafkaPublisher {
+    /// On drop, attempt a non-blocking flush.
+    /// This is a best-effort attempt. For guaranteed delivery, call `disconnect()` explicitly.
+    fn drop(&mut self) {
+        info!("KafkaPublisher dropped, attempting to flush remaining messages.");
+        self.producer.flush(Duration::from_secs(5)).ok(); // Non-blocking flush
     }
 }
+
 
 #[async_trait]
 impl MessagePublisher for KafkaPublisher {
@@ -257,10 +256,14 @@ impl KafkaConsumer {
             consumer,
         })
     }
-    /// Unsubscribes the consumer from all topics.
-    /// This method takes ownership to ensure it's the final action.
-    pub fn disconnect(&self) {
-        info!("Disconnecting Kafka consumer by unsubscribing...");
+}
+
+
+
+impl Drop for KafkaConsumer {
+    /// On drop, attempt a non-blocking flush.
+    /// This is a best-effort attempt. For guaranteed delivery, call `disconnect()` explicitly.
+    fn drop(&mut self) {
         self.consumer.unsubscribe();
     }
 }

@@ -281,7 +281,8 @@ impl MessageConsumer for AmqpConsumer {
         let commit = Box::new(move |_response: Option<Vec<CanonicalMessage>>| {
             Box::pin(async move {
                 let ack_options = BasicAckOptions {
-                    multiple: true, // Acknowledge all messages up to this one
+                    // Use multiple: true only if we've consumed more than one message.
+                    multiple: messages_len > 1,
                     ..Default::default()
                 };
                 if let Err(e) = last_delivery.ack(ack_options).await {

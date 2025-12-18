@@ -27,6 +27,8 @@ pub struct PerformanceResult {
     pub test_name: String,
     pub write_performance: f64,
     pub read_performance: f64,
+    pub single_write_performance: f64,
+    pub single_read_performance: f64,
 }
 
 /// A global, thread-safe collector for performance results.
@@ -257,19 +259,24 @@ impl Drop for PerformanceSummaryPrinter {
 
         println!("\n\n--- Consolidated Performance Test Results (msgs/sec) ---");
         println!(
-            "{:<25} | {:>20} | {:>20}",
-            "Test Name", "Write Performance", "Read Performance"
+            "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
+            "Test Name", "Write (Batch)", "Read (Batch)", "Write (Single)", "Read (Single)"
         );
-        println!("{:-<25}-|-{:->20}-|-{:->20}", "", "", "");
+        println!(
+            "{:-<25}-|-{:->15}-|-{:->15}-|-{:->15}-|-{:->15}",
+            "", "", "", "", ""
+        );
         for result in results.iter() {
             println!(
-                "{:<25} | {:>20} | {:>20}",
+                "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
                 result.test_name,
                 format_pretty(result.write_performance),
-                format_pretty(result.read_performance)
+                format_pretty(result.read_performance),
+                format_pretty(result.single_write_performance),
+                format_pretty(result.single_read_performance)
             );
         }
-        println!("-----------------------------------------------------------------------\n");
+        println!("---------------------------------------------------------------------------------------\n");
     }
 }
 /// A test harness that manages the lifecycle of Docker containers for a single test.
@@ -284,6 +291,83 @@ where
     // Give some time for docker to be ready
     _docker.up();
     test_fn().await;
+}
+
+/// A generic test runner for direct performance tests.
+///
+/// This function abstracts the common pattern of:
+/// 1. Creating a publisher and a consumer.
+/// 2. Running batch write/read performance tests.
+/// 3. Running single write/read performance tests.
+///
+/// It takes async closures to create the specific publisher and consumer,
+/// making it reusable across different backend implementations.
+pub async fn run_direct_perf_test<P, C, FutP, FutC, Pub, Con>(
+    test_name: &str,
+    create_publisher: P,
+    create_consumer: C,
+) -> PerformanceResult
+where
+    Pub: MessagePublisher + 'static,
+    Con: MessageConsumer + 'static,
+    P: Fn() -> FutP,
+    C: Fn() -> FutC,
+    FutP: std::future::Future<Output = Arc<Pub>>,
+    FutC: std::future::Future<Output = Arc<tokio::sync::Mutex<Con>>>,
+{
+    let publisher = create_publisher().await;
+    let consumer = create_consumer().await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    println!("\n--- Running Single Performance Test for {} ---", test_name);
+    let single_write_perf = measure_single_write_performance(
+        &format!("{} (Single)", test_name),
+        publisher.clone(),
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let single_read_perf = measure_single_read_performance(
+        &format!("{} (Single)", test_name),
+        consumer.clone(),
+        PERF_TEST_MESSAGE_COUNT,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    println!("\n--- Running Batch Performance Test for {} ---", test_name);
+    tokio::time::sleep(Duration::from_millis(200)).await; // Allow consumer setup
+
+    let write_perf = measure_write_performance(
+        &format!("{} (Batch)", test_name),
+        publisher.clone(),
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Add a delay to ensure messages are queryable, especially for Kafka.
+    let read_perf = measure_read_performance(
+        &format!("{} (Batch)", test_name),
+        consumer.clone(),
+        PERF_TEST_MESSAGE_COUNT,
+    )
+    .await;
+
+
+    drop(consumer);
+    drop(publisher);
+    tokio::time::sleep(Duration::from_millis(200)).await; // Allow consumer setup
+
+
+    PerformanceResult {
+        test_name: format!("{} Direct", test_name),
+        write_performance: write_perf,
+        read_performance: read_perf,
+        single_write_performance: single_write_perf,
+        single_read_performance: single_read_perf,
+    }
 }
 
 pub const PERF_TEST_MESSAGE_COUNT: usize = 20_000;
@@ -482,4 +566,96 @@ pub fn format_pretty<N: Display>(num: N) -> String {
         }
         None => formatted_integer,
     }
+}
+
+pub async fn measure_single_write_performance(
+    name: &str,
+    publisher: Arc<dyn MessagePublisher>,
+    num_messages: usize,
+    concurrency: usize,
+) -> f64 {
+    println!(
+        "\n--- Measuring Single-Send Performance for {} ---", name
+    );
+    let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
+
+    tokio::spawn(async move {
+        for _ in 0..num_messages {
+            if tx.send(generate_message()).await.is_err() {
+                break;
+            }
+        }
+        tx.close();
+    });
+
+    let start_time = Instant::now();
+    let mut tasks = tokio::task::JoinSet::new();
+
+    for _ in 0..concurrency {
+        let rx_clone = rx.clone();
+        let publisher_clone = publisher.clone();
+
+        tasks.spawn(async move {
+            while let Ok(message) = rx_clone.recv().await {
+                loop {
+                    match publisher_clone.send(message.clone()).await {
+                        Ok(_) => break,
+                        Err(e) => {
+                            eprintln!("Error sending message: {}. Retrying...", e);
+                            tokio::time::sleep(Duration::from_millis(10)).await; // Backoff
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    while tasks.join_next().await.is_some() {}
+    publisher.flush().await.unwrap();
+
+    let duration = start_time.elapsed();
+    let msgs_per_sec = num_messages as f64 / duration.as_secs_f64();
+
+    println!(
+        "  Sent {} messages individually in {:.2?} ({} msgs/sec)",
+        format_pretty(num_messages),
+        duration,
+        format_pretty(msgs_per_sec)
+    );
+    msgs_per_sec
+}
+
+pub async fn measure_single_read_performance(
+    name: &str,
+    consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
+    num_messages: usize,
+) -> f64 {
+    println!("\n--- Measuring Single-Read Performance for {} ---", name);
+    let start_time = Instant::now();
+
+    for _ in 0..num_messages {
+        let mut consumer_guard = consumer.lock().await;
+        let receive_future = consumer_guard.receive();
+        if let Ok(Ok((_msg, commit))) = tokio::time::timeout(Duration::from_secs(5), receive_future).await {
+            tokio::spawn(async move { commit(None).await });
+        } else {
+            eprintln!("Failed to receive message or timed out. Stopping read performance test.");
+            break;
+        }
+    }
+
+    let duration = start_time.elapsed();
+    let msgs_per_sec = if duration.as_secs_f64() > 0.0 {
+        num_messages as f64 / duration.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    println!(
+        "  Read {} messages individually in {:.2?} ({} msgs/sec)",
+        format_pretty(num_messages),
+        duration,
+        format_pretty(msgs_per_sec)
+    );
+    msgs_per_sec
 }
