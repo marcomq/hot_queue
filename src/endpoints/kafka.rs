@@ -21,7 +21,7 @@ use tracing::info;
 pub struct KafkaPublisher {
     producer: FutureProducer,
     topic: String,
-    skip_ack: bool,
+    delayed_ack: bool,
 }
 
 impl KafkaPublisher {
@@ -103,7 +103,7 @@ impl KafkaPublisher {
         Ok(Self {
             producer,
             topic: topic.to_string(),
-            skip_ack: config.skip_ack,
+            delayed_ack: config.delayed_ack,
         })
     }
 
@@ -111,11 +111,10 @@ impl KafkaPublisher {
         Self {
             producer: self.producer.clone(),
             topic: topic.to_string(),
-            skip_ack: self.skip_ack,
+            delayed_ack: self.delayed_ack,
         }
     }
 }
-
 
 impl Drop for KafkaPublisher {
     /// On drop, attempt a non-blocking flush.
@@ -125,7 +124,6 @@ impl Drop for KafkaPublisher {
         self.producer.flush(Duration::from_secs(5)).ok(); // Non-blocking flush
     }
 }
-
 
 #[async_trait]
 impl MessagePublisher for KafkaPublisher {
@@ -152,7 +150,7 @@ impl MessagePublisher for KafkaPublisher {
         };
         record = record.key(&key);
 
-        if !self.skip_ack {
+        if !self.delayed_ack {
             // Await the delivery report from Kafka, providing at-least-once guarantees per message.
             self.producer
                 .send(record, Duration::from_secs(0))
@@ -252,13 +250,9 @@ impl KafkaConsumer {
         // Wrap the consumer in an Arc to allow it to be shared.
         let consumer = Arc::new(consumer);
 
-        Ok(Self {
-            consumer,
-        })
+        Ok(Self { consumer })
     }
 }
-
-
 
 impl Drop for KafkaConsumer {
     /// On drop, attempt a non-blocking flush.
@@ -357,7 +351,7 @@ fn process_message(
     let payload = message
         .payload()
         .ok_or_else(|| anyhow!("Kafka message has no payload"))?;
-    let mut canonical_message = CanonicalMessage::new(payload.to_vec()); 
+    let mut canonical_message = CanonicalMessage::new(payload.to_vec());
     if let Some(headers) = message.headers() {
         if headers.count() > 0 {
             let mut metadata = std::collections::HashMap::new();
@@ -373,9 +367,11 @@ fn process_message(
     messages.push(canonical_message);
 
     // Update the topic partition list with the latest offset
-    last_offset_tpl.add_partition_offset(
-        message.topic(),
-        message.partition(),
-        Offset::Offset(message.offset() + 1),
-    ).map_err(|e| anyhow::anyhow!(e))
+    last_offset_tpl
+        .add_partition_offset(
+            message.topic(),
+            message.partition(),
+            Offset::Offset(message.offset() + 1),
+        )
+        .map_err(|e| anyhow::anyhow!(e))
 }

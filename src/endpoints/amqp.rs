@@ -21,8 +21,8 @@ pub struct AmqpPublisher {
     channel: Channel,
     exchange: String,
     routing_key: String,
-    persistent: bool,
-    skip_ack: bool,
+    no_persistence: bool,
+    delayed_ack: bool,
 }
 
 impl AmqpPublisher {
@@ -40,7 +40,7 @@ impl AmqpPublisher {
             .queue_declare(
                 routing_key,
                 QueueDeclareOptions {
-                    durable: config.persistent,
+                    durable: !config.no_persistence,
                     ..Default::default()
                 },
                 FieldTable::default(),
@@ -51,8 +51,8 @@ impl AmqpPublisher {
             channel,
             exchange: "".to_string(), // Default exchange
             routing_key: routing_key.to_string(),
-            persistent: config.persistent,
-            skip_ack: config.skip_ack,
+            no_persistence: config.no_persistence,
+            delayed_ack: config.delayed_ack,
         })
     }
 
@@ -61,8 +61,8 @@ impl AmqpPublisher {
             channel: self.channel.clone(),
             exchange: self.exchange.clone(),
             routing_key: routing_key.to_string(),
-            persistent: self.persistent,
-            skip_ack: self.skip_ack,
+            no_persistence: self.no_persistence,
+            delayed_ack: self.delayed_ack,
         }
     }
 }
@@ -70,11 +70,11 @@ impl AmqpPublisher {
 #[async_trait]
 impl MessagePublisher for AmqpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let mut properties = if self.persistent {
+        let mut properties = if self.no_persistence {
+            BasicProperties::default()
+        } else {
             // Delivery mode 2 makes the message persistent
             BasicProperties::default().with_delivery_mode(2)
-        } else {
-            BasicProperties::default()
         };
         if let Some(metadata) = message.metadata {
             if !metadata.is_empty() {
@@ -100,7 +100,7 @@ impl MessagePublisher for AmqpPublisher {
             )
             .await?;
 
-        if !self.skip_ack {
+        if !self.delayed_ack {
             // Wait for the broker's publisher confirmation.
             confirmation.await?;
         }
@@ -137,7 +137,7 @@ impl AmqpConsumer {
             .queue_declare(
                 queue,
                 QueueDeclareOptions {
-                    durable: config.persistent,
+                    durable: !config.no_persistence,
                     ..Default::default()
                 },
                 FieldTable::default(),
@@ -230,9 +230,14 @@ fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> Canonic
         if !headers.inner().is_empty() {
             let mut metadata = std::collections::HashMap::new();
             for (key, value) in headers.inner().iter() {
-                if let lapin::types::AMQPValue::LongString(s) = value {
-                    metadata.insert(key.to_string(), s.to_string());
-                }
+                let value_str = match value {
+                    lapin::types::AMQPValue::LongString(s) => s.to_string(),
+                    lapin::types::AMQPValue::ShortString(s) => s.to_string(),
+                    lapin::types::AMQPValue::Boolean(b) => b.to_string(),
+                    lapin::types::AMQPValue::LongInt(i) => i.to_string(),
+                    _ => continue,
+                };
+                metadata.insert(key.to_string(), value_str);
             }
             if !metadata.is_empty() {
                 canonical_message.metadata = Some(metadata);

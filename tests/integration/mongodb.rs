@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::integration::common::PERF_TEST_MESSAGE_COUNT;
 
 use super::common::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test,
-    run_pipeline_test, run_test_with_docker, setup_logging,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
+    run_test_with_docker, setup_logging,
 };
 use hot_queue::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
 const CONFIG_YAML: &str = r#"
@@ -59,26 +59,31 @@ pub async fn test_mongodb_performance_direct() {
 
         // Drop collection before test
         let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
-        client.database(&config.database).collection::<mongodb::bson::Document>(collection_name).drop().await.ok();
+        client
+            .database(&config.database)
+            .collection::<mongodb::bson::Document>(collection_name)
+            .drop()
+            .await
+            .ok();
 
         let result = run_direct_perf_test(
-                "MongoDB",
-                || async {
-                    Arc::new(
-                        MongoDbPublisher::new(&config, collection_name)
-                            .await
-                            .unwrap(),
-                    )
-                },
-                || async {
-                    Arc::new(tokio::sync::Mutex::new(
-                        MongoDbConsumer::new(&config, collection_name)
-                            .await
-                            .unwrap(),
-                    ))
-                },
-            )
-            .await;
+            "MongoDB",
+            || async {
+                Arc::new(
+                    MongoDbPublisher::new(&config, collection_name)
+                        .await
+                        .unwrap(),
+                )
+            },
+            || async {
+                Arc::new(tokio::sync::Mutex::new(
+                    MongoDbConsumer::new(&config, collection_name)
+                        .await
+                        .unwrap(),
+                ))
+            },
+        )
+        .await;
 
         add_performance_result(result);
     })

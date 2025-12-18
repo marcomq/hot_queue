@@ -2,8 +2,8 @@
 use std::sync::Arc;
 
 use super::common::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test,
-    run_pipeline_test, run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
+    run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
 use hot_queue::endpoints::nats::{NatsConsumer, NatsPublisher};
 const PERF_TEST_MESSAGE_COUNT_DIRECT: usize = 20_000;
@@ -13,11 +13,11 @@ routes:
     in:
       memory: { topic: "test-in-nats" }
     out:
-      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream", await_ack: true }
+      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream", delayed_ack: false }
 
   nats_to_memory:
     in:
-      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream", await_ack: true  }
+      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream", delayed_ack: false  }
     out:
       memory: { topic: "test-out-nats", capacity: {out_capacity} }
 "#;
@@ -53,26 +53,28 @@ pub async fn test_nats_performance_direct() {
         let subject = "perf_nats_direct.subject";
         let config = hot_queue::models::NatsConfig {
             url: "nats://localhost:4222".to_string(),
-            skip_ack: false,
+            delayed_ack: false,
             ..Default::default()
         };
 
         let result = run_direct_perf_test(
-                "NATS",
-                || async {
-                    Arc::new(
-                        NatsPublisher::new(&config, subject, Some(stream_name))
-                            .await
-                            .unwrap(),
-                    )
-                },
-                || async {
-                    Arc::new(tokio::sync::Mutex::new(
-                        NatsConsumer::new(&config, stream_name, subject).await.unwrap(),
-                    ))
-                },
-            )
-            .await;
+            "NATS",
+            || async {
+                Arc::new(
+                    NatsPublisher::new(&config, subject, Some(stream_name))
+                        .await
+                        .unwrap(),
+                )
+            },
+            || async {
+                Arc::new(tokio::sync::Mutex::new(
+                    NatsConsumer::new(&config, stream_name, subject)
+                        .await
+                        .unwrap(),
+                ))
+            },
+        )
+        .await;
 
         add_performance_result(result);
     })

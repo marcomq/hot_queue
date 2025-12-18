@@ -1,9 +1,8 @@
 #![allow(dead_code)]
 
 use super::common::{
-    add_performance_result, run_direct_perf_test,
-    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker, setup_logging,
-    PERF_TEST_MESSAGE_COUNT,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
+    run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
 use hot_queue::endpoints::mqtt::{MqttConsumer, MqttPublisher};
 use std::sync::Arc;
@@ -59,19 +58,25 @@ pub async fn test_mqtt_performance_direct() {
         };
 
         let result = run_direct_perf_test(
-                "MQTT",
-                || async {
-                    let publisher_id = format!("pub-{}", Uuid::new_v4().as_simple());
-                    Arc::new(MqttPublisher::new(&config, topic, &publisher_id).await.unwrap())
-                },
-                || async {
-                    let consumer_id = format!("sub-{}", Uuid::new_v4().as_simple());
-                    Arc::new(tokio::sync::Mutex::new(
-                        MqttConsumer::new(&config, topic, &consumer_id).await.unwrap(),
-                    ))
-                },
-            )
-            .await;
+            "MQTT",
+            || async {
+                let publisher_id = format!("pub-{}", Uuid::new_v4().as_simple());
+                Arc::new(
+                    MqttPublisher::new(&config, topic, &publisher_id)
+                        .await
+                        .unwrap(),
+                )
+            },
+            || async {
+                let consumer_id = format!("sub-{}", Uuid::new_v4().as_simple());
+                Arc::new(tokio::sync::Mutex::new(
+                    MqttConsumer::new(&config, topic, &consumer_id)
+                        .await
+                        .unwrap(),
+                ))
+            },
+        )
+        .await;
 
         add_performance_result(result);
     })

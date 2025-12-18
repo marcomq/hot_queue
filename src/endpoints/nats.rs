@@ -22,8 +22,8 @@ enum NatsClient {
 pub struct NatsPublisher {
     client: NatsClient,
     subject: String,
-    // await_ack is only used for JetStream
-    skip_ack: bool,
+    // delayed_ack is only used for JetStream
+    delayed_ack: bool,
 }
 
 impl NatsPublisher {
@@ -53,8 +53,8 @@ impl NatsPublisher {
             NatsClient::JetStream(jetstream)
         } else {
             info!("NATS publisher is in Core mode (non-persistent).");
-            if !config.skip_ack {
-                warn!("'skip_ack' is false but NATS is in Core mode, which does not support acknowledgements. The flag will be ignored.");
+            if !config.delayed_ack {
+                warn!("'delayed_ack' is false but NATS is in Core mode, which does not support acknowledgements. The flag will be ignored.");
             }
             NatsClient::Core(nats_client)
         };
@@ -62,7 +62,7 @@ impl NatsPublisher {
         Ok(Self {
             client,
             subject: subject.to_string(),
-            skip_ack: config.skip_ack,
+            delayed_ack: config.delayed_ack,
         })
     }
 
@@ -75,7 +75,7 @@ impl NatsPublisher {
         Self {
             client,
             subject: subject.to_string(),
-            skip_ack: self.skip_ack,
+            delayed_ack: self.delayed_ack,
         }
     }
 }
@@ -99,7 +99,7 @@ impl MessagePublisher for NatsPublisher {
                     .publish_with_headers(self.subject.clone(), headers, message.payload)
                     .await?;
 
-                if !self.skip_ack {
+                if !self.delayed_ack {
                     ack_future.await?; // Wait for the server acknowledgment
                 }
             }

@@ -51,14 +51,23 @@ impl MessageConsumer for DeduplicationConsumer {
                 }
             };
 
-            if self.db.get(&key)?.is_some() {
-                info!("Duplicate message detected and skipped");
-                commit(None).await;
-                continue;
-            }
-
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            self.db.insert(&key, &now.to_be_bytes())?;
+            // Atomically insert only if key doesn't exist
+            match self.db.compare_and_swap(
+                &key,
+                None as Option<&[u8]>,
+                Some(&now.to_be_bytes()[..]),
+            )? {
+                Ok(_) => {
+                    // Successfully inserted - not a duplicate, proceed
+                }
+                Err(_) => {
+                    // Key already exists - duplicate detected
+                    info!("Duplicate message detected and skipped");
+                    commit(None).await;
+                    continue;
+                }
+            }
 
             if rand::random::<u8>() < 5 {
                 // ~2% chance

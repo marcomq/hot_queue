@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use super::common::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test,
-    run_pipeline_test, run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
+    run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
 use hot_queue::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
 use std::sync::Arc;
@@ -58,22 +58,20 @@ pub async fn test_kafka_performance_direct() {
                 ("acks".to_string(), "1".to_string()), // Wait for leader ack, a good balance
                 ("compression.type".to_string(), "snappy".to_string()), // Use snappy compression
             ]),
-            skip_ack: true, // Use "fire-and-forget" for high throughput
+            delayed_ack: true, // Use "fire-and-forget" for high throughput
             ..Default::default()
         };
 
         let result = run_direct_perf_test(
-                "Kafka",
-                || async {
-                    Arc::new(KafkaPublisher::new(&config, topic).await.unwrap())
-                },
-                || async {
-                    Arc::new(tokio::sync::Mutex::new(
-                        KafkaConsumer::new(&config, topic).unwrap(),
-                    ))
-                },
-            )
-            .await;
+            "Kafka",
+            || async { Arc::new(KafkaPublisher::new(&config, topic).await.unwrap()) },
+            || async {
+                Arc::new(tokio::sync::Mutex::new(
+                    KafkaConsumer::new(&config, topic).unwrap(),
+                ))
+            },
+        )
+        .await;
 
         add_performance_result(result);
     })

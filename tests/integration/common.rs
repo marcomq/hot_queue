@@ -319,7 +319,10 @@ where
     let consumer = create_consumer().await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    println!("\n--- Running Single Performance Test for {} ---", test_name);
+    println!(
+        "\n--- Running Single Performance Test for {} ---",
+        test_name
+    );
     let single_write_perf = measure_single_write_performance(
         &format!("{} (Single)", test_name),
         publisher.clone(),
@@ -355,11 +358,9 @@ where
     )
     .await;
 
-
     drop(consumer);
     drop(publisher);
     tokio::time::sleep(Duration::from_millis(200)).await; // Allow consumer setup
-
 
     PerformanceResult {
         test_name: format!("{} Direct", test_name),
@@ -427,12 +428,27 @@ pub async fn measure_write_performance(
 
                 // Retry sending the batch if some messages fail.
                 let mut messages_to_send = batch;
+                let mut retry_count = 0;
+                const MAX_RETRIES: usize = 5;
                 loop {
-                    match publisher_clone.send_batch(messages_to_send.clone()).await {
+                    match publisher_clone
+                        .send_batch(std::mem::take(&mut messages_to_send))
+                        .await
+                    {
                         Ok((_, failed)) if failed.is_empty() => break, // All sent successfully
-                        Ok((_, failed)) => messages_to_send = failed,  // Retry failed messages
-                        Err(e) => eprintln!("Error sending bulk messages: {}", e),
-                    }
+                        Ok((_, failed)) => {
+                            messages_to_send = failed;
+                            retry_count = 0; // Reset on partial success
+                        }
+                        Err(e) => {
+                            eprintln!("Error sending bulk messages: {}", e);
+                            retry_count += 1;
+                            if retry_count >= MAX_RETRIES {
+                                eprintln!("Max retries reached, giving up on batch");
+                                break;
+                            }
+                        }
+                    };
                     tokio::time::sleep(Duration::from_millis(10)).await; // Backoff before retry
                 }
             }
@@ -539,7 +555,7 @@ pub async fn measure_read_performance(
     msgs_per_sec
 }
 
-/// Formats a number with commas as thousand separators.
+/// Formats a number with underscores as thousand separators.
 /// Handles both integers and floating-point numbers.
 pub fn format_pretty<N: Display>(num: N) -> String {
     let s = num.to_string();
@@ -574,9 +590,7 @@ pub async fn measure_single_write_performance(
     num_messages: usize,
     concurrency: usize,
 ) -> f64 {
-    println!(
-        "\n--- Measuring Single-Send Performance for {} ---", name
-    );
+    println!("\n--- Measuring Single-Send Performance for {} ---", name);
     let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
 
     tokio::spawn(async move {
@@ -602,7 +616,8 @@ pub async fn measure_single_write_performance(
                         Ok(_) => break,
                         Err(e) => {
                             eprintln!("Error sending message: {}. Retrying...", e);
-                            tokio::time::sleep(Duration::from_millis(10)).await; // Backoff
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            // Backoff
                         }
                     }
                 }
@@ -636,7 +651,9 @@ pub async fn measure_single_read_performance(
     for _ in 0..num_messages {
         let mut consumer_guard = consumer.lock().await;
         let receive_future = consumer_guard.receive();
-        if let Ok(Ok((_msg, commit))) = tokio::time::timeout(Duration::from_secs(5), receive_future).await {
+        if let Ok(Ok((_msg, commit))) =
+            tokio::time::timeout(Duration::from_secs(5), receive_future).await
+        {
             tokio::spawn(async move { commit(None).await });
         } else {
             eprintln!("Failed to receive message or timed out. Stopping read performance test.");
