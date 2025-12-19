@@ -226,7 +226,10 @@ async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig>
 }
 
 fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> CanonicalMessage {
-    let mut canonical_message = CanonicalMessage::new(delivery.data.clone());
+    let mut canonical_message = CanonicalMessage::new(
+        delivery.data.clone(),
+        Some(delivery.delivery_tag as u128),
+    );
     if let Some(headers) = delivery.properties.headers().as_ref() {
         if !headers.inner().is_empty() {
             let mut metadata = std::collections::HashMap::new();

@@ -91,7 +91,7 @@ mod tests {
         let channel = memory_consumer.channel();
 
         // Push a message to the source
-        let msg = CanonicalMessage::new(b"original".to_vec());
+        let msg = CanonicalMessage::new(b"original".to_vec(), None);
         channel.send_message(msg).await.unwrap();
 
         // Create the compute handler using a lambda
@@ -127,7 +127,7 @@ mod tests {
 
         let publisher = ComputePublisher::new(Box::new(memory_publisher), handler);
 
-        let msg = CanonicalMessage::new(b"original".to_vec());
+        let msg = CanonicalMessage::new(b"original".to_vec(), None);
         publisher.send(msg).await.unwrap();
 
         let received = channel.drain_messages();

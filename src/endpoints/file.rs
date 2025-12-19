@@ -120,7 +120,7 @@ impl MessageConsumer for FileConsumer {
         if buffer.ends_with(b"\n") {
             buffer.pop();
         }
-        let message = CanonicalMessage::new(buffer);
+        let message = CanonicalMessage::new(buffer, None);
 
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);

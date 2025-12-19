@@ -71,25 +71,24 @@ impl MongoDbPublisher {
 
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let object_id = mongodb::bson::oid::ObjectId::new();
-        let mut msg_with_metadata = message;
-        msg_with_metadata
-            .metadata
-            .get_or_insert_with(Default::default)
-            .insert("mongodb_object_id".to_string(), object_id.to_string());
-
-        if msg_with_metadata.message_id.is_none() {
-            // If no message_id is present, generate one from the ObjectId.
-            let oid_bytes = object_id.bytes();
+    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {      
+        let (object_id, message_id_bin) = if let Some(message_id) = &message.message_id {
+            // An ObjectId is 12 bytes. A u128 is 16 bytes. We use the last 12 bytes
+            // of the message_id to construct the ObjectId, as they are more likely to be unique.
+            let bin_id = message_id.to_be_bytes();
+            let id_bytes: [u8; 12] = bin_id[4..].try_into()?;
+            let oid =  mongodb::bson::oid::ObjectId::from(id_bytes);
+            (oid, bin_id)
+        } else {
+            let oid = mongodb::bson::oid::ObjectId::new();
             let mut id_bytes = [0u8; 16];
-            id_bytes[4..16].copy_from_slice(&oid_bytes);
-            msg_with_metadata.message_id = Some(u128::from_be_bytes(id_bytes));
-        }
-        let message_id_bin = msg_with_metadata.message_id.map(|id| mongodb::bson::Binary {
+            id_bytes[4..16].copy_from_slice(&oid.bytes());
+            (oid, id_bytes)
+        };
+        let message_id_bin = mongodb::bson::Binary {
             subtype: mongodb::bson::spec::BinarySubtype::Uuid,
-            bytes: id.to_be_bytes().to_vec(),
-        });
+            bytes: message_id_bin.to_vec(),
+        };
 
         // Manually construct the document to handle u64 message_id for BSON.
         // BSON only supports i64, so we do a wrapping conversion.
@@ -98,14 +97,14 @@ impl MessagePublisher for MongoDbPublisher {
             "message_id": message_id_bin,
             "payload": Bson::Binary(mongodb::bson::Binary {
                 subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                bytes: msg_with_metadata.payload.to_vec() }),
-            "metadata": to_document(&msg_with_metadata.metadata)?,
+                bytes: message.payload.to_vec() }),
+            "metadata": to_document(&message.metadata)?,
             "locked_until": null
         };
 
         self.collection.insert_one(doc).await?;
 
-        Ok(Some(msg_with_metadata))
+        Ok(Some(message))
     }
 
     async fn send_batch(

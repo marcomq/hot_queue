@@ -6,8 +6,8 @@
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use uuid::Uuid;
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CanonicalMessage {
@@ -18,9 +18,9 @@ pub struct CanonicalMessage {
 }
 
 impl CanonicalMessage {
-    pub fn new(payload: Vec<u8>) -> Self {
+    pub fn new(payload: Vec<u8>, message_id: Option<u128>) -> Self {
         Self {
-            message_id: None,
+            message_id,
             payload: Bytes::from(payload),
             metadata: None,
         }
@@ -61,14 +61,12 @@ impl CanonicalMessage {
             }
         }
         let bytes = serde_json::to_vec(&payload)?;
-        let mut msg = Self::new(bytes);
-        msg.message_id = message_id;
-        Ok(msg)
+        Ok(Self::new(bytes, message_id))
     }
 
     pub fn from_struct<T: Serialize>(data: &T) -> Result<Self, serde_json::Error> {
         let bytes = serde_json::to_vec(data)?;
-        Ok(Self::new(bytes))
+        Ok(Self::new(bytes, None))
     }
 
     pub fn get_struct<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {

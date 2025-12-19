@@ -13,6 +13,7 @@ use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, Signatur
 use std::io::BufReader;
 use std::sync::Arc;
 use tokio::time::Duration;
+use uuid::Uuid;
 use tracing::{info, warn};
 
 enum NatsClient {
@@ -197,9 +198,31 @@ impl NatsConsumer {
 
         Ok(Self { subscription })
     }
-    fn create_canonical_message(message: &async_nats::Message) -> CanonicalMessage {
-        let mut canonical_message = CanonicalMessage::new(message.payload.to_vec());
+    fn create_canonical_message(
+        message: &async_nats::Message,
+        sequence: Option<u64>,
+    ) -> CanonicalMessage {
+        // The most reliable ID is the JetStream sequence number.
+        let mut message_id: Option<u128> = sequence.map(|s| s as u128);
 
+        // If no sequence is available (e.g., Core NATS), fall back to the Nats-Msg-Id header.
+        if message_id.is_none() {
+            if let Some(headers) = &message.headers {
+                if let Some(msg_id_header) = headers.get("Nats-Msg-Id") {
+                    let id_str = msg_id_header.as_str();
+                    // Attempt to parse the ID as a UUID or a raw u128.
+                    if let Ok(uuid) = Uuid::parse_str(id_str) {
+                        message_id = Some(uuid.as_u128());
+                    } else if let Ok(n) = id_str.parse::<u128>() {
+                        message_id = Some(n);
+                    } else {
+                        warn!(header_value = %id_str, "Could not parse 'Nats-Msg-Id' header as a UUID or u128");
+                    }
+                }
+            }
+        }
+
+        let mut canonical_message = CanonicalMessage::new(message.payload.to_vec(), message_id);
         if let Some(headers) = &message.headers {
             if !headers.is_empty() {
                 let mut metadata = std::collections::HashMap::new();
@@ -224,7 +247,8 @@ impl MessageConsumer for NatsConsumer {
                 let message = futures::StreamExt::next(stream)
                     .await
                     .ok_or_else(|| anyhow!("NATS JetStream subscription ended"))??;
-                let msg = Self::create_canonical_message(&message);
+                let sequence = message.info().ok().map(|meta| meta.stream_sequence);
+                let msg = Self::create_canonical_message(&message, sequence);
                 let commit: CommitFunc = Box::new(move |_response| {
                     Box::pin(async move {
                         message.ack().await.unwrap_or_else(|e| {
@@ -241,7 +265,7 @@ impl MessageConsumer for NatsConsumer {
 
                 // Core NATS has no ack, so the commit is a no-op.
                 let commit: CommitFunc = Box::new(move |_| Box::pin(async {}));
-                let msg = Self::create_canonical_message(&message);
+                let msg = Self::create_canonical_message(&message, None);
                 (msg, commit)
             }
         };
@@ -267,13 +291,16 @@ impl MessageConsumer for NatsConsumer {
 
                 // Process the first message if it exists
                 if let Some(Ok(first_message)) = message_stream {
-                    canonical_messages.push(Self::create_canonical_message(&first_message));
+                    let sequence = first_message.info().ok().map(|meta| meta.stream_sequence);
+                    canonical_messages.push(Self::create_canonical_message(&first_message, sequence));
                     jetstream_messages.push(first_message);
 
                     // Greedily fetch the rest of the batch
                     while canonical_messages.len() < max_messages {
                         if let Ok(Some(message)) = stream.try_next().await {
-                            canonical_messages.push(Self::create_canonical_message(&message));
+                            let sequence = message.info().ok().map(|meta| meta.stream_sequence);
+                            canonical_messages
+                                .push(Self::create_canonical_message(&message, sequence));
                             jetstream_messages.push(message);
                         } else {
                             break; // No more messages in the buffer
@@ -305,7 +332,7 @@ impl MessageConsumer for NatsConsumer {
                 let commit_closure: BatchCommitFunc = Box::new(|_| Box::pin(async {}));
 
                 if let Some(message) = sub.next().await {
-                    messages.push(Self::create_canonical_message(&message));
+                    messages.push(Self::create_canonical_message(&message, None));
                 }
                 Ok((messages, commit_closure))
             }

@@ -125,7 +125,7 @@ async fn handle_request(
     body: Bytes,
 ) -> Response {
     let (response_tx, response_rx) = oneshot::channel();
-    let mut message = CanonicalMessage::new(body.to_vec());
+    let mut message = CanonicalMessage::new(body.to_vec(), None);
 
     let mut metadata = HashMap::new();
     for (key, value) in headers.iter() {
@@ -246,7 +246,7 @@ impl MessagePublisher for HttpPublisher {
 
         // If a response sink is configured, wrap the response in a CanonicalMessage
         if self.response_sink.is_some() {
-            let mut response_message = CanonicalMessage::new(response_bytes);
+            let mut response_message = CanonicalMessage::new(response_bytes, None);
             if !response_metadata.is_empty() {
                 response_message.metadata = Some(response_metadata);
             }

@@ -211,7 +211,7 @@ mod tests {
             .await
             .expect("Failed to create fanout publisher");
 
-        let msg = CanonicalMessage::new(b"fanout_payload".to_vec());
+        let msg = CanonicalMessage::new(b"fanout_payload".to_vec(), None);
         publisher.send(msg).await.expect("Failed to send message");
 
         let chan1 = get_or_create_channel(&mem_cfg1);

@@ -132,7 +132,11 @@ impl MessageConsumer for MqttConsumer {
             .await
             .ok_or_else(|| anyhow!("MQTT source channel closed"))?;
 
-        let canonical_message = CanonicalMessage::new(p.payload.to_vec());
+        // The MQTT `pkid` is a u16 packet identifier for QoS > 0 messages.
+        // It is reused by the client and broker for different messages over time,
+        // so it is NOT a unique message identifier. Using it for deduplication
+        // would lead to incorrect behavior. We pass `None` here.
+        let canonical_message = CanonicalMessage::new(p.payload.to_vec(), None);
 
         let commit = Box::new(move |_response| {
             Box::pin(async move {
