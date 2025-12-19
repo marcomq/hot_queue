@@ -301,6 +301,7 @@ impl MessageConsumer for NatsConsumer {
             NatsSubscription::Core(sub) => {
                 let mut messages = Vec::new();
                 // Core NATS has no ack, so the commit is a no-op.
+                // Just read one message for now, optimize it later when needed
                 let commit_closure: BatchCommitFunc = Box::new(|_| Box::pin(async {}));
 
                 if let Some(message) = sub.next().await {
