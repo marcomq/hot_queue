@@ -2,8 +2,8 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
-use crate::traits::MessagePublisher;
-use crate::traits::{BoxFuture, CommitFunc, MessageConsumer};
+use crate::traits::{into_batch_commit_func, BatchCommitFunc};
+use crate::traits::{BoxFuture, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -49,14 +49,23 @@ impl FilePublisher {
 impl MessagePublisher for FilePublisher {
     #[instrument(skip_all, fields(message_id = ?message.message_id))]
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let mut payload = message.payload;
-        payload.push(b'\n'); // Add a newline to separate messages
-
         let mut writer = self.writer.lock().await;
-        writer.write_all(&payload).await?;
-        // writer.flush().await?;
-
+        // Since Bytes is immutable, we write the payload and the newline separately.
+        // The BufWriter will handle this efficiently.
+        writer.write_all(&message.payload).await?;
+        writer.write_all(b"\n").await?;
         Ok(None)
+    }
+
+    // just using normal send for simplicity - it is fast enough
+    async fn send_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+        crate::traits::send_batch_helper(self, messages, |publisher, message| {
+            Box::pin(publisher.send(message))
+        })
+        .await
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
@@ -95,22 +104,28 @@ impl FileConsumer {
 #[async_trait]
 impl MessageConsumer for FileConsumer {
     #[instrument(skip(self), fields(path = %self.path), err(level = "info"))]
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        let mut line = String::new();
+    async fn receive_batch(
+        &mut self,
+        _max_messages: usize,
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+        let mut buffer = Vec::new();
 
-        let bytes_read = self.reader.read_line(&mut line).await?;
+        let bytes_read = self.reader.read_until(b'\n', &mut buffer).await?;
         if bytes_read == 0 {
             info!("End of file reached, consumer will stop.");
             return Err(anyhow!("End of file reached: {}", self.path));
         }
 
-        // Trim the newline character that read_line includes
-        let message = CanonicalMessage::new(line.trim_end().as_bytes().to_vec());
+        // Trim the newline character that read_until includes
+        if buffer.ends_with(b"\n") {
+            buffer.pop();
+        }
+        let message = CanonicalMessage::new(buffer);
 
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);
 
-        Ok((message, commit))
+        Ok((vec![message], into_batch_commit_func(commit)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -142,8 +157,9 @@ mod tests {
         let msg1 = CanonicalMessage::from_json(json!({"hello": "world"})).unwrap();
         let msg2 = CanonicalMessage::from_json(json!({"foo": "bar"})).unwrap();
 
-        sink.send(msg1.clone()).await.unwrap();
-        sink.send(msg2.clone()).await.unwrap();
+        sink.send_batch(vec![msg1.clone(), msg2.clone()])
+            .await
+            .unwrap();
         // Explicitly flush to ensure data is written before we try to read it.
         sink.flush().await.unwrap();
         // Drop the sink to release the file lock on some OSes before the source tries to open it.
@@ -158,13 +174,14 @@ mod tests {
         assert_eq!(received_msg1.message_id, msg1.message_id);
         assert_eq!(received_msg1.payload, msg1.payload);
 
-        let (received_msg2, commit2) = source.receive().await.unwrap();
+        let (received_msgs, commit2) = source.receive_batch(1).await.unwrap();
+        let received_msg2 = received_msgs.into_iter().next().unwrap();
         commit2(None).await;
         assert_eq!(received_msg2.message_id, msg2.message_id);
         assert_eq!(received_msg2.payload, msg2.payload);
 
         // 6. Verify that reading again results in EOF
-        let eof_result = source.receive().await;
+        let eof_result = source.receive_batch(1).await;
         match eof_result {
             Ok(_) => panic!("Expected an error, but got Ok"),
             Err(e) => assert!(e.to_string().contains("End of file reached")),

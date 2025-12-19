@@ -1,24 +1,23 @@
 #![allow(dead_code)]
+
 use super::common::{
-    measure_read_performance, measure_write_performance, run_performance_pipeline_test,
-    run_pipeline_test, run_test_with_docker, setup_logging, PERF_TEST_CONCURRENCY,
-    PERF_TEST_MESSAGE_COUNT,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
+    run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
 use hot_queue::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-const PERF_TEST_MESSAGE_COUNT_DIRECT: usize = 20_000;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_amqp:
     in:
       memory: { topic: "amqp-test-in" }
     out:
-      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp", await_ack: true  }
+      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp", delayed_ack: false  }
 
   amqp_to_memory:
     in:
-      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp", await_ack: true  }
+      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp", delayed_ack: false  }
     out:
       memory: { topic: "amqp-test-out", capacity: {out_capacity} }
 "#;
@@ -53,31 +52,22 @@ pub async fn test_amqp_performance_direct() {
         let queue = "perf_test_amqp_direct";
         let config = hot_queue::models::AmqpConfig {
             url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
-            await_ack: false,
+            delayed_ack: true,
             ..Default::default()
         };
 
-        let publisher = Arc::new(AmqpPublisher::new(&config, queue).await.unwrap());
-        measure_write_performance(
+        let result = run_direct_perf_test(
             "AMQP",
-            publisher,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
+            || async { Arc::new(AmqpPublisher::new(&config, queue).await.unwrap()) },
+            || async {
+                Arc::new(tokio::sync::Mutex::new(
+                    AmqpConsumer::new(&config, queue).await.unwrap(),
+                ))
+            },
         )
         .await;
 
-        tokio::time::sleep(Duration::from_secs(10)).await;
-
-        let consumer = Arc::new(tokio::sync::Mutex::new(
-            AmqpConsumer::new(&config, queue).await.unwrap(),
-        ));
-        measure_read_performance(
-            "AMQP",
-            consumer,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
-        )
-        .await;
+        add_performance_result(result);
     })
     .await;
 }

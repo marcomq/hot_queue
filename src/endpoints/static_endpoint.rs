@@ -2,8 +2,8 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
-
 use crate::traits::MessagePublisher;
+use crate::traits::{into_batch_commit_func, BatchCommitFunc};
 use crate::traits::{BoxFuture, CommitFunc, MessageConsumer};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
@@ -31,6 +31,16 @@ impl MessagePublisher for StaticEndpointPublisher {
         trace!(response = %self.content, "Sending static response");
         let payload = serde_json::to_vec(&Value::String(self.content.clone()))?;
         Ok(Some(CanonicalMessage::new(payload)))
+    }
+
+    async fn send_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+        crate::traits::send_batch_helper(self, messages, |publisher, message| {
+            Box::pin(publisher.send(message))
+        })
+        .await
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
@@ -65,6 +75,15 @@ impl MessageConsumer for StaticRequestConsumer {
             Box::pin(async {}) as BoxFuture<'static, ()>
         });
         Ok((message, commit))
+    }
+
+    async fn receive_batch(
+        &mut self,
+        _max_messages: usize,
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+        let (msg, commit) = self.receive().await?;
+        let commit = into_batch_commit_func(commit);
+        Ok((vec![msg], commit))
     }
 
     fn as_any(&self) -> &dyn Any {

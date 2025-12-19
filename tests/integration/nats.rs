@@ -1,24 +1,23 @@
 #![allow(dead_code)]
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use super::common::{
-    measure_read_performance, measure_write_performance, run_performance_pipeline_test,
-    run_pipeline_test, run_test_with_docker, setup_logging, PERF_TEST_CONCURRENCY,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
+    run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
 use hot_queue::endpoints::nats::{NatsConsumer, NatsPublisher};
 const PERF_TEST_MESSAGE_COUNT_DIRECT: usize = 20_000;
-const PERF_TEST_MESSAGE_COUNT: usize = 50_000;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_nats:
     in:
       memory: { topic: "test-in-nats" }
     out:
-      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream", await_ack: true }
+      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream", delayed_ack: false }
 
   nats_to_memory:
     in:
-      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream", await_ack: true  }
+      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream", delayed_ack: false  }
     out:
       memory: { topic: "test-out-nats", capacity: {out_capacity} }
 "#;
@@ -50,41 +49,34 @@ pub async fn test_nats_performance_pipeline() {
 pub async fn test_nats_performance_direct() {
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/nats.yml", || async {
-        let stream_name = "perf_stream_nats_direct";
-        let subject = format!("{}.direct", stream_name);
+        let stream_name = "perf_nats_direct";
+        let subject = "perf_nats_direct.subject";
         let config = hot_queue::models::NatsConfig {
             url: "nats://localhost:4222".to_string(),
-            await_ack: true,
+            delayed_ack: false,
             ..Default::default()
         };
 
-        let publisher = Arc::new(
-            NatsPublisher::new(&config, &subject, Some(stream_name))
-                .await
-                .unwrap(),
-        );
-        measure_write_performance(
+        let result = run_direct_perf_test(
             "NATS",
-            publisher,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
+            || async {
+                Arc::new(
+                    NatsPublisher::new(&config, subject, Some(stream_name))
+                        .await
+                        .unwrap(),
+                )
+            },
+            || async {
+                Arc::new(tokio::sync::Mutex::new(
+                    NatsConsumer::new(&config, stream_name, subject)
+                        .await
+                        .unwrap(),
+                ))
+            },
         )
         .await;
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        let consumer = Arc::new(tokio::sync::Mutex::new(
-            NatsConsumer::new(&config, stream_name, &subject)
-                .await
-                .unwrap(),
-        ));
-        measure_read_performance(
-            "NATS",
-            consumer,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
-        )
-        .await;
+        add_performance_result(result);
     })
     .await;
 }

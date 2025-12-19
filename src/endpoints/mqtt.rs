@@ -1,5 +1,8 @@
 use crate::models::MqttConfig;
-use crate::traits::{BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{
+    into_batch_commit_func, BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer,
+    MessagePublisher,
+};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -13,7 +16,7 @@ use tracing::{error, info, trace, warn};
 pub struct MqttPublisher {
     client: AsyncClient,
     topic: String,
-    _eventloop_handle: Arc<JoinHandle<()>>,
+    eventloop_handle: Arc<JoinHandle<()>>,
 }
 
 impl MqttPublisher {
@@ -27,19 +30,29 @@ impl MqttPublisher {
         Ok(Self {
             client,
             topic: topic.to_string(),
-            _eventloop_handle: Arc::new(eventloop_handle),
+            eventloop_handle: Arc::new(eventloop_handle),
         })
     }
     pub fn with_topic(&self, topic: &str) -> Self {
         Self {
             client: self.client.clone(),
             topic: topic.to_string(),
-            _eventloop_handle: self._eventloop_handle.clone(),
+            eventloop_handle: self.eventloop_handle.clone(),
         }
     }
 
     pub async fn disconnect(&self) -> Result<(), rumqttc::ClientError> {
         self.client.disconnect().await
+    }
+}
+
+impl Drop for MqttPublisher {
+    fn drop(&mut self) {
+        // When the publisher is dropped, abort its background eventloop task.
+        // Only abort when this is the last reference to the eventloop handle.
+        if Arc::strong_count(&self.eventloop_handle) == 1 {
+            self.eventloop_handle.abort();
+        }
     }
 }
 
@@ -54,6 +67,16 @@ impl MessagePublisher for MqttPublisher {
             .publish(&self.topic, QoS::AtLeastOnce, false, message.payload)
             .await?;
         Ok(None)
+    }
+
+    async fn send_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+        crate::traits::send_batch_helper(self, messages, |publisher, message| {
+            Box::pin(publisher.send(message))
+        })
+        .await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -119,6 +142,15 @@ impl MessageConsumer for MqttConsumer {
         });
 
         Ok((canonical_message, commit))
+    }
+
+    async fn receive_batch(
+        &mut self,
+        _max_messages: usize,
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+        let (msg, commit) = self.receive().await?;
+        let commit = into_batch_commit_func(commit);
+        Ok((vec![msg], commit))
     }
 
     fn as_any(&self) -> &dyn Any {

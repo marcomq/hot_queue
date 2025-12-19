@@ -1,13 +1,13 @@
 #![allow(dead_code)]
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+
+use crate::integration::common::PERF_TEST_MESSAGE_COUNT;
 
 use super::common::{
-    measure_read_performance, measure_write_performance, run_performance_pipeline_test,
-    run_pipeline_test, run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
+    run_test_with_docker, setup_logging,
 };
 use hot_queue::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
-const PERF_TEST_MESSAGE_COUNT_DIRECT: usize = 10_000;
-const PERF_TEST_CONCURRENCY: usize = 100;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_mongodb:
@@ -57,7 +57,7 @@ pub async fn test_mongodb_performance_direct() {
             ..Default::default()
         };
 
-        // Ensure the collection is clean before the test
+        // Drop collection before test
         let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
         client
             .database(&config.database)
@@ -66,33 +66,26 @@ pub async fn test_mongodb_performance_direct() {
             .await
             .ok();
 
-        let publisher = Arc::new(
-            MongoDbPublisher::new(&config, collection_name)
-                .await
-                .unwrap(),
-        );
-        measure_write_performance(
-            "MONGODB",
-            publisher,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
+        let result = run_direct_perf_test(
+            "MongoDB",
+            || async {
+                Arc::new(
+                    MongoDbPublisher::new(&config, collection_name)
+                        .await
+                        .unwrap(),
+                )
+            },
+            || async {
+                Arc::new(tokio::sync::Mutex::new(
+                    MongoDbConsumer::new(&config, collection_name)
+                        .await
+                        .unwrap(),
+                ))
+            },
         )
         .await;
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        let consumer = Arc::new(tokio::sync::Mutex::new(
-            MongoDbConsumer::new(&config, collection_name)
-                .await
-                .unwrap(),
-        ));
-        measure_read_performance(
-            "MONGODB",
-            consumer,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
-        )
-        .await;
+        add_performance_result(result);
     })
     .await;
 }

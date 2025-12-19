@@ -5,6 +5,7 @@
 
 pub mod canonical_message;
 pub mod endpoints;
+pub mod middleware;
 pub mod models;
 pub mod route;
 pub mod traits;

@@ -1,10 +1,9 @@
 use crate::models::KafkaConfig;
-use crate::traits::{BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
-use async_stream::stream;
 use async_trait::async_trait;
-use futures::stream::{Stream, StreamExt};
+use futures::{StreamExt, TryStreamExt};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::message::OwnedHeaders;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
@@ -15,15 +14,14 @@ use rdkafka::{
     message::Headers,
     ClientConfig, Message, TopicPartitionList,
 };
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
 pub struct KafkaPublisher {
     producer: FutureProducer,
     topic: String,
-    await_ack: bool,
+    delayed_ack: bool,
 }
 
 impl KafkaPublisher {
@@ -58,7 +56,7 @@ impl KafkaPublisher {
         }
 
         if let (Some(username), Some(password)) = (&config.username, &config.password) {
-            client_config.set("sasl.mechanisms", "PLAIN");
+            client_config.set("sasl.mechanism", "PLAIN");
             client_config.set("sasl.username", username);
             client_config.set("sasl.password", password);
             client_config.set("security.protocol", "sasl_ssl");
@@ -105,7 +103,7 @@ impl KafkaPublisher {
         Ok(Self {
             producer,
             topic: topic.to_string(),
-            await_ack: config.await_ack,
+            delayed_ack: config.delayed_ack,
         })
     }
 
@@ -113,28 +111,24 @@ impl KafkaPublisher {
         Self {
             producer: self.producer.clone(),
             topic: topic.to_string(),
-            await_ack: self.await_ack,
+            delayed_ack: self.delayed_ack,
         }
     }
 }
 
 impl Drop for KafkaPublisher {
+    /// On drop, attempt a non-blocking flush.
+    /// This is a best-effort attempt. For guaranteed delivery, call `disconnect()` explicitly.
     fn drop(&mut self) {
-        // When the sink is dropped, we need to make sure all buffered messages are sent.
-        // `flush` is async, but `drop` is sync. The recommended way is to block on the future.
-        // This is especially important in tests or short-lived processes.
-        info!(
-            topic = %self.topic,
-            "Flushing Kafka producer before dropping sink..."
-        );
-        let _ = self.producer.flush(Duration::from_secs(10)); // Block for up to 10s
+        info!("KafkaPublisher dropped, attempting to flush remaining messages.");
+        self.producer.flush(Duration::from_secs(5)).ok(); // Non-blocking flush
     }
 }
 
 #[async_trait]
 impl MessagePublisher for KafkaPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let mut record = FutureRecord::to(&self.topic).payload(&message.payload);
+        let mut record = FutureRecord::to(&self.topic).payload(&message.payload[..]);
 
         if let Some(metadata) = &message.metadata {
             if !metadata.is_empty() {
@@ -156,7 +150,7 @@ impl MessagePublisher for KafkaPublisher {
         };
         record = record.key(&key);
 
-        if self.await_ack {
+        if !self.delayed_ack {
             // Await the delivery report from Kafka, providing at-least-once guarantees per message.
             self.producer
                 .send(record, Duration::from_secs(0))
@@ -175,6 +169,16 @@ impl MessagePublisher for KafkaPublisher {
         Ok(None)
     }
 
+    async fn send_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+        crate::traits::send_batch_helper(self, messages, |publisher, message| {
+            Box::pin(publisher.send(message))
+        })
+        .await
+    }
+
     async fn flush(&self) -> anyhow::Result<()> {
         self.producer
             .flush(Duration::from_secs(10))
@@ -185,19 +189,9 @@ impl MessagePublisher for KafkaPublisher {
         self
     }
 }
-
-type KafkaMessageStream = Pin<
-    Box<
-        dyn Stream<Item = Result<rdkafka::message::OwnedMessage, rdkafka::error::KafkaError>>
-            + Send,
-    >,
->;
-
 pub struct KafkaConsumer {
     // The consumer needs to be stored to keep the connection alive.
     consumer: Arc<StreamConsumer>,
-    // The stream is created from the consumer and wrapped in a Mutex for safe access.
-    stream: Mutex<KafkaMessageStream>,
 }
 use std::any::Any;
 
@@ -233,7 +227,7 @@ impl KafkaConsumer {
             );
         }
         if let (Some(username), Some(password)) = (&config.username, &config.password) {
-            client_config.set("sasl.mechanisms", "PLAIN");
+            client_config.set("sasl.mechanism", "PLAIN");
             client_config.set("sasl.username", username);
             client_config.set("sasl.password", password);
             client_config.set("security.protocol", "sasl_ssl");
@@ -255,63 +249,31 @@ impl KafkaConsumer {
 
         // Wrap the consumer in an Arc to allow it to be shared.
         let consumer = Arc::new(consumer);
-        // Create a stream that loops, calling `recv()` on the consumer.
-        // This avoids the complex lifetime issues with `consumer.stream()`.
-        let stream = {
-            let consumer = consumer.clone();
-            stream! {
-                loop {
-                    yield consumer.recv().await.map(|m| m.detach());
-                }
-            }
-        }
-        .boxed();
 
-        Ok(Self {
-            consumer,
-            stream: Mutex::new(stream),
-        })
+        Ok(Self { consumer })
+    }
+}
+
+impl Drop for KafkaConsumer {
+    /// On drop, attempt a non-blocking flush.
+    /// This is a best-effort attempt. For guaranteed delivery, call `disconnect()` explicitly.
+    fn drop(&mut self) {
+        self.consumer.unsubscribe();
     }
 }
 
 #[async_trait]
 impl MessageConsumer for KafkaConsumer {
     async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        let message = self
-            .stream
-            .get_mut()
-            .unwrap()
-            .next()
-            .await
-            .ok_or_else(|| anyhow!("Kafka consumer stream ended"))??;
-
-        let payload = message
-            .payload()
-            .ok_or_else(|| anyhow!("Kafka message has no payload"))?;
-        let mut canonical_message = CanonicalMessage::new(payload.to_vec());
-
-        if let Some(headers) = message.headers() {
-            if headers.count() > 0 {
-                let mut metadata = std::collections::HashMap::new();
-                for header in headers.iter() {
-                    metadata.insert(
-                        header.key.to_string(),
-                        String::from_utf8_lossy(header.value.unwrap_or_default()).to_string(),
-                    );
-                }
-                canonical_message.metadata = Some(metadata);
-            }
-        }
+        let message = self.consumer.recv().await?;
+        let mut tpl = TopicPartitionList::new();
+        let mut messages = Vec::new();
+        process_message(message, &mut messages, &mut tpl)?;
+        let canonical_message = messages.pop().unwrap();
 
         // The commit function for Kafka needs to commit the offset of the processed message.
         // We can't move `self.consumer` into the closure, but we can commit by position.
         let consumer = self.consumer.clone();
-        let mut tpl = TopicPartitionList::new();
-        tpl.add_partition_offset(
-            message.topic(),
-            message.partition(),
-            Offset::Offset(message.offset() + 1),
-        )?;
         let commit = Box::new(move |_response: Option<CanonicalMessage>| {
             Box::pin(async move {
                 if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
@@ -323,7 +285,93 @@ impl MessageConsumer for KafkaConsumer {
         Ok((canonical_message, commit))
     }
 
+    async fn receive_batch(
+        &mut self,
+        max_messages: usize,
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+        let mut messages = Vec::with_capacity(max_messages);
+        let mut last_offset_tpl = TopicPartitionList::new();
+        {
+            // Create a stream from the consumer for this batch operation.
+            let mut stream = self.consumer.stream();
+
+            // Block and wait for the first message.
+            if let Some(first_message_result) = stream.next().await {
+                match first_message_result {
+                    Ok(message) => {
+                        process_message(message, &mut messages, &mut last_offset_tpl)?;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+
+            // If we got one message, greedily consume any others that are already buffered.
+            if !messages.is_empty() {
+                for _ in 1..max_messages {
+                    match stream.try_next().await {
+                        Ok(Some(message)) => {
+                            process_message(message, &mut messages, &mut last_offset_tpl)?;
+                        }
+                        _ => {
+                            // Stream is not ready, an error occurred, or it ended.
+                            // In any case, we stop trying to get more messages for this batch.
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let messages_len = messages.len();
+
+        let consumer = self.consumer.clone();
+        let commit = Box::new(move |_responses: Option<Vec<CanonicalMessage>>| {
+            Box::pin(async move {
+                // Only commit if there are offsets to commit.
+                if messages_len > 0 {
+                    if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
+                        tracing::error!("Failed to commit Kafka message batch: {:?}", e);
+                    }
+                }
+            }) as BoxFuture<'static, ()>
+        });
+        Ok((messages, commit))
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+/// Helper function to process a Kafka message and add it to the batch.
+fn process_message(
+    message: rdkafka::message::BorrowedMessage,
+    messages: &mut Vec<CanonicalMessage>,
+    last_offset_tpl: &mut TopicPartitionList,
+) -> anyhow::Result<()> {
+    let payload = message
+        .payload()
+        .ok_or_else(|| anyhow!("Kafka message has no payload"))?;
+    let mut canonical_message = CanonicalMessage::new(payload.to_vec());
+    if let Some(headers) = message.headers() {
+        if headers.count() > 0 {
+            let mut metadata = std::collections::HashMap::new();
+            for header in headers.iter() {
+                metadata.insert(
+                    header.key.to_string(),
+                    String::from_utf8_lossy(header.value.unwrap_or_default()).to_string(),
+                );
+            }
+            canonical_message.metadata = Some(metadata);
+        }
+    }
+    messages.push(canonical_message);
+
+    // Update the topic partition list with the latest offset
+    last_offset_tpl
+        .add_partition_offset(
+            message.topic(),
+            message.partition(),
+            Offset::Offset(message.offset() + 1),
+        )
+        .map_err(|e| anyhow::anyhow!(e))
 }

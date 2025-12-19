@@ -1,13 +1,12 @@
 #![allow(dead_code)]
+
 use super::common::{
-    measure_read_performance, measure_write_performance, run_performance_pipeline_test,
-    run_pipeline_test, run_test_with_docker, setup_logging, PERF_TEST_CONCURRENCY,
-    PERF_TEST_MESSAGE_COUNT,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
+    run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
 use hot_queue::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-const PERF_TEST_MESSAGE_COUNT_DIRECT: usize = 20_000;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_kafka:
@@ -59,31 +58,22 @@ pub async fn test_kafka_performance_direct() {
                 ("acks".to_string(), "1".to_string()), // Wait for leader ack, a good balance
                 ("compression.type".to_string(), "snappy".to_string()), // Use snappy compression
             ]),
-            await_ack: false, // Use "fire-and-forget" for high throughput
+            delayed_ack: true, // Use "fire-and-forget" for high throughput
             ..Default::default()
         };
 
-        let publisher = Arc::new(KafkaPublisher::new(&config, topic).await.unwrap());
-        measure_write_performance(
+        let result = run_direct_perf_test(
             "Kafka",
-            publisher,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
+            || async { Arc::new(KafkaPublisher::new(&config, topic).await.unwrap()) },
+            || async {
+                Arc::new(tokio::sync::Mutex::new(
+                    KafkaConsumer::new(&config, topic).unwrap(),
+                ))
+            },
         )
         .await;
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        let consumer = Arc::new(tokio::sync::Mutex::new(
-            KafkaConsumer::new(&config, topic).unwrap(),
-        ));
-        measure_read_performance(
-            "Kafka",
-            consumer,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
-        )
-        .await;
+        add_performance_result(result);
     })
     .await;
 }
