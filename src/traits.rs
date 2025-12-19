@@ -7,6 +7,7 @@ use crate::CanonicalMessage;
 use async_trait::async_trait;
 pub use futures::future::BoxFuture;
 use std::any::Any;
+use std::future::Future;
 
 /// A closure that can be called to commit the message.
 /// It returns a `BoxFuture` to allow for async commit operations.
@@ -136,4 +137,20 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
     };
 
     Ok((responses, failed_messages))
+}
+
+#[async_trait]
+pub trait Compute: Send + Sync {
+    async fn run(&self, msg: CanonicalMessage) -> anyhow::Result<CanonicalMessage>;
+}
+
+#[async_trait]
+impl<F, Fut> Compute for F
+where
+    F: Fn(CanonicalMessage) -> Fut + Send + Sync,
+    Fut: Future<Output = anyhow::Result<CanonicalMessage>> + Send,
+{
+    async fn run(&self, msg: CanonicalMessage) -> anyhow::Result<CanonicalMessage> {
+        self(msg).await
+    }
 }

@@ -3,11 +3,13 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
 
+use crate::traits::Compute;
 use serde::{
     de::{MapAccess, Visitor},
     Deserialize, Deserializer, Serialize,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
 
@@ -34,6 +36,32 @@ fn default_concurrency() -> usize {
 
 fn default_dlq_retry_attempts() -> usize {
     3
+}
+
+#[derive(Clone)]
+pub struct ComputeHandler(pub Arc<dyn Compute>);
+
+impl ComputeHandler {
+    pub fn new(compute: impl Compute + 'static) -> Self {
+        Self(Arc::new(compute))
+    }
+}
+
+impl std::fmt::Debug for ComputeHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ComputeHandler")
+    }
+}
+
+impl<'de> Deserialize<'de> for ComputeHandler {
+    fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Err(serde::de::Error::custom(
+            "ComputeHandler cannot be deserialized from config",
+        ))
+    }
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
@@ -176,6 +204,8 @@ pub enum Middleware {
     Deduplication(DeduplicationMiddleware),
     Metrics(MetricsMiddleware),
     Dlq(Box<DeadLetterQueueMiddleware>),
+    #[serde(skip)]
+    Compute(ComputeHandler),
 }
 
 /// Deduplication middleware configuration.
@@ -452,7 +482,8 @@ kafka_to_nats:
                         assert_eq!(nats_cfg.config.url, "nats://localhost:4222");
                     }
                     has_dlq = true;
-                }
+                },
+                &crate::models::Middleware::Compute(_) => todo!()
             }
         }
 

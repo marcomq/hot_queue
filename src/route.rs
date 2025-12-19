@@ -114,6 +114,7 @@ impl Route {
                         }
                     };
                     debug!("Received a batch of {} messages sequentially", messages.len());
+
                     // Process the batch sequentially without spawning a new task
                     match publisher.send_batch(messages).await {
                         Ok((response, failed)) if failed.is_empty() => {

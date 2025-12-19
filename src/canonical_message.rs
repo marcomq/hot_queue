@@ -4,6 +4,7 @@
 //  git clone https://github.com/marcomq/hot_queue
 
 use bytes::Bytes;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -27,6 +28,15 @@ impl CanonicalMessage {
     pub fn from_json(payload: serde_json::Value) -> Result<Self, serde_json::Error> {
         let bytes = serde_json::to_vec(&payload)?;
         Ok(Self::new(bytes))
+    }
+
+    pub fn from_struct<T: Serialize>(data: &T) -> Result<Self, serde_json::Error> {
+        let bytes = serde_json::to_vec(data)?;
+        Ok(Self::new(bytes))
+    }
+
+    pub fn get_struct<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+        serde_json::from_slice(&self.payload)
     }
 
     pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {

@@ -280,21 +280,19 @@ impl MessageConsumer for NatsConsumer {
                 }
 
                 let commit_closure: BatchCommitFunc = Box::new(move |_responses| {
-                        Box::pin(async move {
-                            // Acknowledge messages concurrently.
-                            // A concurrency limit of 1000 is chosen to balance parallelism
-                            // with not overwhelming the NATS server or spawning too many tasks.
-                            futures::stream::iter(jetstream_messages)
-                                .for_each_concurrent(
-                                    Some(1000),
-                                    |message| async move {
-                                        if let Err(e) = message.ack().await {
-                                            tracing::error!("Failed to ACK NATS message: {:?}", e);
-                                        }
-                                    })
-                                .await;
-                        }) as BoxFuture<'static, ()>
-                    });
+                    Box::pin(async move {
+                        // Acknowledge messages concurrently.
+                        // A concurrency limit of 1000 is chosen to balance parallelism
+                        // with not overwhelming the NATS server or spawning too many tasks.
+                        futures::stream::iter(jetstream_messages)
+                            .for_each_concurrent(Some(1000), |message| async move {
+                                if let Err(e) = message.ack().await {
+                                    tracing::error!("Failed to ACK NATS message: {:?}", e);
+                                }
+                            })
+                            .await;
+                    }) as BoxFuture<'static, ()>
+                });
 
                 Ok((canonical_messages, commit_closure))
             }

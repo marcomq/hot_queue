@@ -8,12 +8,14 @@ use crate::traits::{MessageConsumer, MessagePublisher};
 use anyhow::Result;
 use std::sync::Arc;
 
+mod compute;
 #[cfg(feature = "dedup")]
 mod deduplication;
 mod dlq;
 #[cfg(feature = "metrics")]
 mod metrics;
 
+use compute::{ComputeConsumer, ComputePublisher};
 #[cfg(feature = "dedup")]
 use deduplication::DeduplicationConsumer;
 use dlq::DlqPublisher;
@@ -38,6 +40,9 @@ pub async fn apply_middlewares_to_consumer(
             #[cfg(feature = "metrics")]
             Middleware::Metrics(cfg) => {
                 Box::new(MetricsConsumer::new(consumer, cfg, route_name, "input"))
+            }
+            Middleware::Compute(handler) => {
+                Box::new(ComputeConsumer::new(consumer, handler.clone()))
             }
             Middleware::Dlq(_) => consumer, // DLQ is a publisher-only middleware
             #[allow(unreachable_patterns)]
@@ -67,6 +72,9 @@ pub async fn apply_middlewares_to_publisher(
             #[cfg(feature = "metrics")]
             Middleware::Metrics(cfg) => {
                 Box::new(MetricsPublisher::new(publisher, cfg, route_name, "output"))
+            }
+            Middleware::Compute(handler) => {
+                Box::new(ComputePublisher::new(publisher, handler.clone()))
             }
             // This middleware is consumer-only
             #[cfg(feature = "dedup")]
