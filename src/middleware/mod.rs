@@ -14,6 +14,8 @@ mod deduplication;
 mod dlq;
 #[cfg(feature = "metrics")]
 mod metrics;
+mod random_panic;
+mod retry;
 
 use compute::{ComputeConsumer, ComputePublisher};
 #[cfg(feature = "dedup")]
@@ -21,6 +23,8 @@ use deduplication::DeduplicationConsumer;
 use dlq::DlqPublisher;
 #[cfg(feature = "metrics")]
 use metrics::{MetricsConsumer, MetricsPublisher};
+use random_panic::{RandomPanicConsumer, RandomPanicPublisher};
+use retry::RetryPublisher;
 
 /// Wraps a `MessageConsumer` with the middlewares specified in the endpoint configuration.
 ///
@@ -45,6 +49,8 @@ pub async fn apply_middlewares_to_consumer(
                 Box::new(ComputeConsumer::new(consumer, handler.clone()))
             }
             Middleware::Dlq(_) => consumer, // DLQ is a publisher-only middleware
+            Middleware::Retry(_) => consumer, // Retry is currently publisher-only
+            Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(anyhow::anyhow!(
@@ -79,6 +85,8 @@ pub async fn apply_middlewares_to_publisher(
             // This middleware is consumer-only
             #[cfg(feature = "dedup")]
             Middleware::Deduplication(_) => publisher,
+            Middleware::Retry(cfg) => Box::new(RetryPublisher::new(publisher, cfg.clone())),
+            Middleware::RandomPanic(cfg) => Box::new(RandomPanicPublisher::new(publisher, cfg)),
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(anyhow::anyhow!(

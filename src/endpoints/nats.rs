@@ -164,6 +164,7 @@ impl NatsConsumer {
 
             let stream = jetstream.get_stream(stream_name).await?;
 
+            let max_ack_pending = config.prefetch_count.unwrap_or(10000) as i64;
             let consumer = stream
                 .create_consumer(jetstream::consumer::pull::Config {
                     durable_name: Some(format!(
@@ -174,7 +175,7 @@ impl NatsConsumer {
                     )),
                     filter_subject: subject.to_string(),
                     deliver_policy: jetstream::consumer::DeliverPolicy::All,
-                    max_ack_pending: 10000,
+                    max_ack_pending,
                     ..Default::default()
                 })
                 .await?;

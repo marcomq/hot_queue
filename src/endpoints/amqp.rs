@@ -50,7 +50,7 @@ impl AmqpPublisher {
 
         Ok(Self {
             channel,
-            exchange: "".to_string(), // Default exchange
+            exchange: config.exchange.clone().unwrap_or_default(),
             routing_key: routing_key.to_string(),
             no_persistence: config.no_persistence,
             delayed_ack: config.delayed_ack,
@@ -147,11 +147,9 @@ impl AmqpConsumer {
 
         // Set prefetch count. This acts as a buffer and is crucial for concurrent processing.
         // We'll get the concurrency from the route config, but for now, let's use a reasonable default
-        // that can be overridden by a new method. For now, we'll prepare for it.
-        // Let's default to a higher value to allow for future concurrency.
-        // The actual concurrency will be limited by the main bridge loop.
-        // A value of 100 is a safe default for enabling parallelism.
-        channel.basic_qos(100, BasicQosOptions::default()).await?;
+        // that can be overridden by a new method.
+        let prefetch_count = config.prefetch_count.unwrap_or(100);
+        channel.basic_qos(prefetch_count, BasicQosOptions::default()).await?;
 
         let consumer = channel
             .basic_consume(

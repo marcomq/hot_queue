@@ -169,7 +169,7 @@ impl MongoDbConsumer {
         Ok(Self {
             collection,
             change_stream,
-            polling_interval: Duration::from_millis(100),
+            polling_interval: Duration::from_millis(config.polling_interval_ms.unwrap_or(100)),
         })
     }
 }

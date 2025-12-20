@@ -38,6 +38,23 @@ fn default_dlq_retry_attempts() -> usize {
     3
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_retry_attempts() -> usize {
+    3
+}
+fn default_initial_interval_ms() -> u64 {
+    100
+}
+fn default_max_interval_ms() -> u64 {
+    5000
+}
+fn default_multiplier() -> f64 {
+    2.0
+}
+
 #[derive(Clone)]
 pub struct ComputeHandler(pub Arc<dyn Compute>);
 
@@ -200,11 +217,13 @@ pub enum EndpointType {
 
 /// An enumeration of all supported middleware types.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Middleware {
     Deduplication(DeduplicationMiddleware),
     Metrics(MetricsMiddleware),
     Dlq(Box<DeadLetterQueueMiddleware>),
+    Retry(RetryMiddleware),
+    RandomPanic(RandomPanicMiddleware),
     #[serde(skip)]
     Compute(ComputeHandler),
 }
@@ -231,6 +250,31 @@ pub struct DeadLetterQueueMiddleware {
     /// Number of retry attempts for the DLQ send. Defaults to 3.
     #[serde(default = "default_dlq_retry_attempts")]
     pub dlq_retry_attempts: usize,
+    #[serde(default = "default_initial_interval_ms")]
+    pub dlq_initial_interval_ms: u64,
+    #[serde(default = "default_max_interval_ms")]
+    pub dlq_max_interval_ms: u64,
+    #[serde(default = "default_multiplier")]
+    pub dlq_multiplier: f64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RetryMiddleware {
+    #[serde(default = "default_retry_attempts")]
+    pub max_retries: usize,
+    #[serde(default = "default_initial_interval_ms")]
+    pub initial_interval_ms: u64,
+    #[serde(default = "default_max_interval_ms")]
+    pub max_interval_ms: u64,
+    #[serde(default = "default_multiplier")]
+    pub multiplier: f64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RandomPanicMiddleware {
+    pub probability: f64,
 }
 
 // --- Kafka Specific Configuration ---
@@ -292,6 +336,7 @@ pub struct NatsConfig {
     #[serde(default)]
     pub no_jetstream: bool,
     pub default_stream: Option<String>,
+    pub prefetch_count: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -319,6 +364,8 @@ pub struct AmqpConfig {
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub exchange: Option<String>,
+    pub prefetch_count: Option<u16>,
     #[serde(default)]
     pub tls: TlsConfig,
     #[serde(default)]
@@ -345,6 +392,7 @@ pub struct MongoDbEndpoint {
 pub struct MongoDbConfig {
     pub url: String,
     pub database: String,
+    pub polling_interval_ms: Option<u64>,
 }
 
 // --- MQTT Specific Configuration ---
@@ -368,6 +416,10 @@ pub struct MqttConfig {
     #[serde(default)]
     pub tls: TlsConfig,
     pub queue_capacity: Option<usize>,
+    pub qos: Option<u8>,
+    #[serde(default = "default_true")]
+    pub clean_session: bool,
+    pub keep_alive_seconds: Option<u64>,
 }
 
 // --- HTTP Specific Configuration ---
@@ -429,6 +481,11 @@ kafka_to_nats:
           sled_path: "/tmp/hot_queue/dedup_db"
           ttl_seconds: 3600
       - metrics: {}
+      - retry:
+          max_retries: 5
+          initial_interval_ms: 200
+      - random_panic:
+          probability: 0.1
       - dlq:
           endpoint:
             nats:
@@ -461,11 +518,13 @@ kafka_to_nats:
 
         // --- Assert Input ---
         let input = &route.input;
-        assert_eq!(input.middlewares.len(), 3);
+        assert_eq!(input.middlewares.len(), 5);
 
         let mut has_dedup = false;
         let mut has_metrics = false;
         let mut has_dlq = false;
+        let mut has_retry = false;
+        let mut has_random_panic = false;
         for middleware in &input.middlewares {
             match middleware {
                 Middleware::Deduplication(dedup) => {
@@ -484,7 +543,16 @@ kafka_to_nats:
                     }
                     has_dlq = true;
                 }
-                &crate::models::Middleware::Compute(_) => todo!(),
+                Middleware::Retry(retry) => {
+                    assert_eq!(retry.max_retries, 5);
+                    assert_eq!(retry.initial_interval_ms, 200);
+                    has_retry = true;
+                }
+                Middleware::RandomPanic(rp) => {
+                    assert!((rp.probability - 0.1).abs() < f64::EPSILON);
+                    has_random_panic = true;
+                }
+                Middleware::Compute(_) => panic!("Compute middleware cannot be deserialized"),
             }
         }
 
@@ -502,6 +570,8 @@ kafka_to_nats:
         assert!(has_dedup);
         assert!(has_metrics);
         assert!(has_dlq);
+        assert!(has_retry);
+        assert!(has_random_panic);
 
         // --- Assert Output ---
         let output = &route.output;
