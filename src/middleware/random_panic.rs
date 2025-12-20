@@ -12,6 +12,12 @@ pub struct RandomPanicConsumer {
 
 impl RandomPanicConsumer {
     pub fn new(inner: Box<dyn MessageConsumer>, config: &RandomPanicMiddleware) -> Self {
+        if !(0.0..=1.0).contains(&config.probability) {
+            panic!(
+                "RandomPanicMiddleware: probability must be between 0.0 and 1.0, got {}",
+                config.probability
+            );
+        }
         Self {
             inner,
             probability: config.probability,
@@ -52,6 +58,12 @@ pub struct RandomPanicPublisher {
 
 impl RandomPanicPublisher {
     pub fn new(inner: Box<dyn MessagePublisher>, config: &RandomPanicMiddleware) -> Self {
+        if !(0.0..=1.0).contains(&config.probability) {
+            panic!(
+                "RandomPanicMiddleware: probability must be between 0.0 and 1.0, got {}",
+                config.probability
+            );
+        }
         Self {
             inner,
             probability: config.probability,

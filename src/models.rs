@@ -262,7 +262,7 @@ pub struct DeadLetterQueueMiddleware {
 #[serde(deny_unknown_fields)]
 pub struct RetryMiddleware {
     #[serde(default = "default_retry_attempts")]
-    pub max_retries: usize,
+    pub max_attempts: usize,
     #[serde(default = "default_initial_interval_ms")]
     pub initial_interval_ms: u64,
     #[serde(default = "default_max_interval_ms")]
@@ -274,7 +274,21 @@ pub struct RetryMiddleware {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RandomPanicMiddleware {
+    #[serde(deserialize_with = "deserialize_probability")]
     pub probability: f64,
+}
+
+fn deserialize_probability<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if !(0.0..=1.0).contains(&value) {
+        return Err(serde::de::Error::custom(
+            "probability must be between 0.0 and 1.0",
+        ));
+    }
+    Ok(value)
 }
 
 // --- Kafka Specific Configuration ---
@@ -482,7 +496,7 @@ kafka_to_nats:
           ttl_seconds: 3600
       - metrics: {}
       - retry:
-          max_retries: 5
+          max_attempts: 5
           initial_interval_ms: 200
       - random_panic:
           probability: 0.1
@@ -544,7 +558,7 @@ kafka_to_nats:
                     has_dlq = true;
                 }
                 Middleware::Retry(retry) => {
-                    assert_eq!(retry.max_retries, 5);
+                    assert_eq!(retry.max_attempts, 5);
                     assert_eq!(retry.initial_interval_ms, 200);
                     has_retry = true;
                 }

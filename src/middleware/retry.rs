@@ -29,12 +29,12 @@ impl RetryPublisher {
             match operation().await {
                 Ok(val) => return Ok(val),
                 Err(e) => {
-                    if attempt > self.config.max_retries {
+                    if attempt >= self.config.max_attempts {
                         return Err(e);
                     }
                     warn!(
                         "Operation failed (attempt {}/{}): {}. Retrying in {}ms...",
-                        attempt, self.config.max_retries, e, interval
+                        attempt, self.config.max_attempts, e, interval
                     );
                     tokio::time::sleep(Duration::from_millis(interval)).await;
                     interval = (interval as f64 * self.config.multiplier) as u64;
@@ -78,17 +78,17 @@ impl MessagePublisher for RetryPublisher {
                     if failed.is_empty() {
                         return Ok((Some(all_responses), Vec::new()));
                     }
-                    if attempt > self.config.max_retries {
+                    if attempt >= self.config.max_attempts {
                         return Ok((Some(all_responses), failed));
                     }
-                    warn!("Batch send partially failed (attempt {}/{}): {} messages failed. Retrying...", attempt, self.config.max_retries, failed.len());
+                    warn!("Batch send partially failed (attempt {}/{}): {} messages failed. Retrying...", attempt, self.config.max_attempts, failed.len());
                     current_messages = failed;
                 }
                 Err(e) => {
-                    if attempt > self.config.max_retries {
+                    if attempt >= self.config.max_attempts {
                         return Err(e);
                     }
-                    warn!("Batch send failed (attempt {}/{}): {}. Retrying...", attempt, self.config.max_retries, e);
+                    warn!("Batch send failed (attempt {}/{}): {}. Retrying...", attempt, self.config.max_attempts, e);
                 }
             }
             tokio::time::sleep(Duration::from_millis(interval)).await;

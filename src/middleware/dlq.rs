@@ -40,6 +40,11 @@ impl DlqPublisher {
         })
     }
 
+    fn next_backoff(&self, current: u64) -> u64 {
+        let next = (current as f64 * self.config.dlq_multiplier) as u64;
+        std::cmp::min(next, self.config.dlq_max_interval_ms)
+    }
+
     /// Attempt to send a message to the DLQ with configurable retries and exponential backoff.
     /// Returns the primary send error if DLQ retries fail, ensuring the caller can retry the primary route.
     async fn send_to_dlq_with_retry(
@@ -63,10 +68,7 @@ impl DlqPublisher {
                         attempt, self.config.dlq_retry_attempts, e, backoff_ms
                     );
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    backoff_ms = (backoff_ms as f64 * self.config.dlq_multiplier) as u64;
-                    if backoff_ms > self.config.dlq_max_interval_ms {
-                        backoff_ms = self.config.dlq_max_interval_ms;
-                    }
+                    backoff_ms = self.next_backoff(backoff_ms);
                 }
                 Err(dlq_error) => {
                     // Final retry exhausted; log comprehensively and return original error
@@ -155,10 +157,7 @@ impl MessagePublisher for DlqPublisher {
                             );
                             messages_to_retry = dlq_failed; // Only retry the ones that failed this attempt.
                             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                            backoff_ms = (backoff_ms as f64 * self.config.dlq_multiplier) as u64;
-                            if backoff_ms > self.config.dlq_max_interval_ms {
-                                backoff_ms = self.config.dlq_max_interval_ms;
-                            }
+                            backoff_ms = self.next_backoff(backoff_ms);
                         }
                         Err(e) if attempt < self.config.dlq_retry_attempts => {
                             warn!(
@@ -166,10 +165,7 @@ impl MessagePublisher for DlqPublisher {
                                 attempt, self.config.dlq_retry_attempts, e, backoff_ms
                             );
                             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                            backoff_ms = (backoff_ms as f64 * self.config.dlq_multiplier) as u64;
-                            if backoff_ms > self.config.dlq_max_interval_ms {
-                                backoff_ms = self.config.dlq_max_interval_ms;
-                            }
+                            backoff_ms = self.next_backoff(backoff_ms);
                         }
                         Err(dlq_error) => {
                             error!("DLQ bulk send failed after {} attempts: {}. Original primary send error: {}", attempt, dlq_error, error_msg);
@@ -212,10 +208,7 @@ impl MessagePublisher for DlqPublisher {
                             );
                             messages_to_retry = dlq_failed;
                             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                            backoff_ms = (backoff_ms as f64 * self.config.dlq_multiplier) as u64;
-                            if backoff_ms > self.config.dlq_max_interval_ms {
-                                backoff_ms = self.config.dlq_max_interval_ms;
-                            }
+                            backoff_ms = self.next_backoff(backoff_ms);
                         }
                         Err(dlq_error) if attempt < self.config.dlq_retry_attempts => {
                             warn!(
@@ -223,10 +216,7 @@ impl MessagePublisher for DlqPublisher {
                                 attempt, self.config.dlq_retry_attempts, dlq_error, backoff_ms
                             );
                             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                            backoff_ms = (backoff_ms as f64 * self.config.dlq_multiplier) as u64;
-                            if backoff_ms > self.config.dlq_max_interval_ms {
-                                backoff_ms = self.config.dlq_max_interval_ms;
-                            }
+                            backoff_ms = self.next_backoff(backoff_ms);
                         }
                         Err(dlq_error) => {
                             error!("DLQ bulk send failed after {} attempts: {}. Original primary send error: {}", attempt, dlq_error, error_msg);

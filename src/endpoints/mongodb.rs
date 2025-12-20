@@ -104,7 +104,7 @@ impl MessagePublisher for MongoDbPublisher {
 
         self.collection.insert_one(doc).await?;
 
-        Ok(Some(message))
+        Ok(None)
     }
 
     async fn send_batch(
