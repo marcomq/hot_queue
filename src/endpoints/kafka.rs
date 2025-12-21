@@ -16,7 +16,7 @@ use rdkafka::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tracing::{debug, info};
 
 pub struct KafkaPublisher {
     producer: FutureProducer,
@@ -120,7 +120,7 @@ impl Drop for KafkaPublisher {
     /// On drop, attempt a non-blocking flush.
     /// This is a best-effort attempt. For guaranteed delivery, call `disconnect()` explicitly.
     fn drop(&mut self) {
-        info!("KafkaPublisher dropped, attempting to flush remaining messages.");
+        debug!("KafkaPublisher dropped, attempting to flush remaining messages.");
         self.producer.flush(Duration::from_secs(5)).ok(); // Non-blocking flush
     }
 }

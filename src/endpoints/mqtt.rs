@@ -13,7 +13,7 @@ use std::time::Duration;
 use std::{any::Any, future::Future};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 pub struct MqttPublisher {
     client: AsyncClient,
     topic: String,
@@ -238,7 +238,7 @@ fn run_eventloop(
                 }
             }
         }
-        info!("MQTT {} eventloop finished.", client_type);
+        debug!("MQTT {} eventloop finished.", client_type);
     });
 
     (handle, async {

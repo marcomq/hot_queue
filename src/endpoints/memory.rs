@@ -39,7 +39,7 @@ impl MemoryChannel {
     /// Helper function for tests to easily send a message to the channel.
     pub async fn send_message(&self, message: CanonicalMessage) -> anyhow::Result<()> {
         self.sender.send(vec![message]).await?;
-        tracing::info!("Message sent to memory {} channel", self.sender.len());
+        tracing::debug!("Message sent to memory {} channel", self.sender.len());
         Ok(())
     }
 

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct DlqPublisher {
     inner: Box<dyn MessagePublisher>,
@@ -59,7 +59,7 @@ impl DlqPublisher {
             attempt += 1;
             match self.dlq_publisher.send(message.clone()).await {
                 Ok(_) => {
-                    info!("Message successfully sent to DLQ on attempt {}", attempt);
+                    debug!("Message successfully sent to DLQ on attempt {}", attempt);
                     return Ok(());
                 }
                 Err(e) if attempt < self.config.dlq_retry_attempts => {
@@ -140,7 +140,7 @@ impl MessagePublisher for DlqPublisher {
                         .await
                     {
                         Ok((_, dlq_failed)) if dlq_failed.is_empty() => {
-                            info!(
+                            debug!(
                                 "Batch of {} messages successfully sent to DLQ on attempt {}.",
                                 failed.len(),
                                 attempt
@@ -198,7 +198,7 @@ impl MessagePublisher for DlqPublisher {
                         .await
                     {
                         Ok((_, dlq_failed)) if dlq_failed.is_empty() => {
-                            info!("Batch of {} messages successfully sent to DLQ on attempt {} after complete primary failure.", messages.len(), attempt);
+                            debug!("Batch of {} messages successfully sent to DLQ on attempt {} after complete primary failure.", messages.len(), attempt);
                             return Ok((None, Vec::new()));
                         }
                         Ok((_, dlq_failed)) if attempt < self.config.dlq_retry_attempts => {

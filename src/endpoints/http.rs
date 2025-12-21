@@ -29,6 +29,7 @@ type HttpSourceMessage = (CanonicalMessage, CommitFunc);
 /// A source that listens for incoming HTTP requests.
 pub struct HttpConsumer {
     request_rx: mpsc::Receiver<HttpSourceMessage>,
+    _shutdown_tx: oneshot::Sender<()>,
 }
 
 #[derive(Clone)]
@@ -42,6 +43,7 @@ struct HttpConsumerState {
 impl HttpConsumer {
     pub async fn new(config: &HttpConfig) -> anyhow::Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<HttpSourceMessage>(100);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
         let pending_requests = if let Some(endpoint) = &config.response_sink {
             let pending = Arc::new(Mutex::new(HashMap::<u128, oneshot::Sender<anyhow::Result<Option<CanonicalMessage>>>>::new()));
@@ -104,6 +106,12 @@ impl HttpConsumer {
                 // Signal that we are about to start serving
                 let _ = ready_tx.send(());
 
+                let shutdown_handle = handle.clone();
+                tokio::spawn(async move {
+                    let _ = shutdown_rx.await;
+                    shutdown_handle.graceful_shutdown(None);
+                });
+
                 axum_server::bind_rustls(addr, tls_config)
                     .handle(handle)
                     .serve(app.into_make_service())
@@ -116,12 +124,17 @@ impl HttpConsumer {
                 // Signal that we are about to start serving
                 let _ = ready_tx.send(());
 
-                axum::serve(listener, app).await.unwrap();
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async move {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .unwrap();
             }
         });
 
         ready_rx.await?;
-        Ok(Self { request_rx })
+        Ok(Self { request_rx, _shutdown_tx: shutdown_tx })
     }
 }
 
@@ -499,5 +512,28 @@ http_route:
         let responses = channel.drain_messages();
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].payload.to_vec(), b"server_reply".to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_http_server_shutdown_on_drop() {
+        let port = get_free_port();
+        let addr = format!("127.0.0.1:{}", port);
+        let config = HttpConfig {
+            url: Some(addr.clone()),
+            tls: Default::default(),
+            response_sink: None,
+        };
+
+        {
+            let _consumer = HttpConsumer::new(&config).await.expect("Failed to create consumer");
+            // Verify we can connect while consumer is alive
+            assert!(tokio::net::TcpStream::connect(&addr).await.is_ok());
+        } // consumer is dropped here, triggering shutdown via _shutdown_tx drop
+
+        // Wait for shutdown to propagate
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify connection is refused (server is down)
+        assert!(tokio::net::TcpStream::connect(&addr).await.is_err());
     }
 }
