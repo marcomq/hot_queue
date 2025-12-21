@@ -464,10 +464,11 @@ pub async fn measure_write_performance(
     while tasks.join_next().await.is_some() {}
     publisher.flush().await.unwrap();
 
-    assert_eq!(
-        final_count.load(std::sync::atomic::Ordering::Relaxed),
-        num_messages
-    );
+    let count = final_count.load(std::sync::atomic::Ordering::Relaxed);
+    if count != num_messages {
+        eprintln!("measure_write_performance: Expected {} messages, but got {}", num_messages, count);
+    }
+    debug_assert_eq!(count, num_messages);
     start_time.elapsed()
 }
 
@@ -564,6 +565,9 @@ pub async fn measure_read_performance(
         }
     }
 
+    if final_count != num_messages {
+        eprintln!("measure_read_performance: Expected {} messages, but got {}", num_messages, final_count);
+    }
     debug_assert_eq!(final_count, num_messages);
     start_time.elapsed()
 }
@@ -616,10 +620,11 @@ pub async fn measure_single_write_performance(
     while tasks.join_next().await.is_some() {}
     publisher.flush().await.unwrap();
 
-    debug_assert_eq!(
-        final_count.load(std::sync::atomic::Ordering::Relaxed),
-        num_messages
-    );
+    let count = final_count.load(std::sync::atomic::Ordering::Relaxed);
+    if count != num_messages {
+        eprintln!("measure_single_write_performance: Expected {} messages, but got {}", num_messages, count);
+    }
+    debug_assert_eq!(count, num_messages);
     start_time.elapsed()
 }
 
@@ -647,6 +652,9 @@ pub async fn measure_single_read_performance(
         }
     }
 
+    if final_count != num_messages {
+        eprintln!("measure_single_read_performance: Expected {} messages, but got {}", num_messages, final_count);
+    }
     debug_assert_eq!(final_count, num_messages);
     start_time.elapsed()
 }

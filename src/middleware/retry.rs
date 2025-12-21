@@ -36,13 +36,17 @@ impl RetryPublisher {
                         "Operation failed (attempt {}/{}): {}. Retrying in {}ms...",
                         attempt, self.config.max_attempts, e, interval
                     );
-                    tokio::time::sleep(Duration::from_millis(interval)).await;
-                    interval = (interval as f64 * self.config.multiplier) as u64;
-                    if interval > self.config.max_interval_ms {
-                        interval = self.config.max_interval_ms;
-                    }
+                    self.sleep_and_backoff(&mut interval).await;
                 }
             }
+        }
+    }
+
+    async fn sleep_and_backoff(&self, interval: &mut u64) {
+        tokio::time::sleep(Duration::from_millis(*interval)).await;
+        *interval = (*interval as f64 * self.config.multiplier) as u64;
+        if *interval > self.config.max_interval_ms {
+            *interval = self.config.max_interval_ms;
         }
     }
 }
@@ -94,11 +98,7 @@ impl MessagePublisher for RetryPublisher {
                     );
                 }
             }
-            tokio::time::sleep(Duration::from_millis(interval)).await;
-            interval = (interval as f64 * self.config.multiplier) as u64;
-            if interval > self.config.max_interval_ms {
-                interval = self.config.max_interval_ms;
-            }
+            self.sleep_and_backoff(&mut interval).await;
         }
     }
 

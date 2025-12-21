@@ -86,10 +86,19 @@ mod mongodb_helper {
     }
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let collection_name = "perf_mongodb_direct";
-        // Note: We might want to drop the collection here if needed, similar to the integration test.
-        // For now, we assume the environment is clean or we append.
+        let config = get_config();
+
+        // Drop collection before test to ensure clean state
+        let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
+        client
+            .database(&config.database)
+            .collection::<mongodb::bson::Document>(collection_name)
+            .drop()
+            .await
+            .ok();
+
         Arc::new(
-            MongoDbPublisher::new(&get_config(), collection_name)
+            MongoDbPublisher::new(&config, collection_name)
                 .await
                 .unwrap(),
         )

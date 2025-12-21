@@ -98,19 +98,26 @@ pub async fn create_publisher_from_route(
     route_name: &str,
     endpoint: &Endpoint,
 ) -> Result<Arc<dyn MessagePublisher>> {
-    // This function was partially refactored. It should create a base publisher
-    // and then apply middlewares, similar to `create_consumer_from_route`.
-    // However, since the middleware application logic already exists in `middleware/mod.rs`,
-    // we can simply call it after creating the base publisher.
-    // For now, let's fix the immediate compilation errors by creating the base publisher
-    // and wrapping it correctly. The middleware logic can be added back cleanly.
-    let publisher = create_base_publisher(route_name, &endpoint.endpoint_type).await?;
+    create_publisher_with_depth(route_name, endpoint, 0).await
+}
+
+async fn create_publisher_with_depth(
+    route_name: &str,
+    endpoint: &Endpoint,
+    depth: usize,
+) -> Result<Arc<dyn MessagePublisher>> {
+    const MAX_DEPTH: usize = 16;
+    if depth > MAX_DEPTH {
+        return Err(anyhow!("Fanout recursion depth exceeded limit of {}", MAX_DEPTH));
+    }
+    let publisher = create_base_publisher(route_name, &endpoint.endpoint_type, depth).await?;
     crate::middleware::apply_middlewares_to_publisher(publisher, endpoint, route_name).await
 }
 
 async fn create_base_publisher(
     route_name: &str,
     endpoint_type: &EndpointType,
+    depth: usize,
 ) -> Result<Box<dyn MessagePublisher>> {
     let publisher = match endpoint_type {
         #[cfg(feature = "kafka")]
@@ -174,7 +181,7 @@ async fn create_base_publisher(
         EndpointType::Fanout(endpoints) => {
             let mut publishers = Vec::with_capacity(endpoints.len());
             for endpoint in endpoints {
-                let p = Box::pin(create_publisher_from_route(route_name, endpoint)).await?;
+                let p = Box::pin(create_publisher_with_depth(route_name, endpoint, depth + 1)).await?;
                 publishers.push(p);
             }
             Ok(Box::new(fanout::FanoutPublisher::new(publishers)) as Box<dyn MessagePublisher>)

@@ -354,7 +354,7 @@ fn process_message(
     // Combine partition and offset for a unique ID within a topic.
     // A u128 is used to hold both values, with the partition in the high 64 bits
     // and the offset in the low 64 bits.
-    let message_id = ((message.partition() as u128) << 64) | (message.offset() as u128);
+    let message_id = ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128);
     let mut canonical_message = CanonicalMessage::new(payload.to_vec(), Some(message_id));
     if let Some(headers) = message.headers() {
         if headers.count() > 0 {

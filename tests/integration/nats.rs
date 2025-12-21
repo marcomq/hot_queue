@@ -76,7 +76,7 @@ pub async fn test_nats_performance_direct() {
         )
         .await;
 
-        add_performance_result(result.clone());
+        add_performance_result(result);
     })
     .await;
 }

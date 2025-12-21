@@ -75,6 +75,9 @@ impl MessagePublisher for MongoDbPublisher {
         let (object_id, message_id_bin) = if let Some(message_id) = &message.message_id {
             // An ObjectId is 12 bytes. A u128 is 16 bytes. We use the last 12 bytes
             // of the message_id to construct the ObjectId, as they are more likely to be unique.
+            // NOTE: This discards the high 4 bytes of the message_id. If two message_ids differ
+            // only in the high 4 bytes, they will result in the same ObjectId, potentially causing
+            // a duplicate key error on insert if _id uniqueness is enforced.
             let bin_id = message_id.to_be_bytes();
             let id_bytes: [u8; 12] = bin_id[4..].try_into()?;
             let oid = mongodb::bson::oid::ObjectId::from(id_bytes);
