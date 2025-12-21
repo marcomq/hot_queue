@@ -550,7 +550,7 @@ pub async fn measure_read_performance(
 
         match tokio::time::timeout(Duration::from_secs(5), receive_future).await {
             Ok(Ok((msgs, commit))) if !msgs.is_empty() => {
-                final_count += 1;
+                final_count += msgs.len();
                 tokio::spawn(async move { commit(None).await });
             }
             Ok(Err(e)) => {
