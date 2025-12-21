@@ -106,3 +106,96 @@ impl MessagePublisher for RetryPublisher {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::MessagePublisher;
+    use crate::CanonicalMessage;
+    use anyhow::anyhow;
+    use async_trait::async_trait;
+    use std::any::Any;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct MockPublisher {
+        attempts: Arc<Mutex<usize>>,
+        succeed_after: usize,
+    }
+
+    #[async_trait]
+    impl MessagePublisher for MockPublisher {
+        async fn send(&self, _msg: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+            let mut attempts = self.attempts.lock().unwrap();
+            *attempts += 1;
+            if *attempts > self.succeed_after {
+                Ok(None)
+            } else {
+                Err(anyhow!("Simulated error"))
+            }
+        }
+
+        async fn send_batch(
+            &self,
+            _messages: Vec<CanonicalMessage>,
+        ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+            let mut attempts = self.attempts.lock().unwrap();
+            *attempts += 1;
+            if *attempts > self.succeed_after {
+                Ok((None, Vec::new()))
+            } else {
+                Err(anyhow!("Simulated batch error"))
+            }
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_success() {
+        let attempts = Arc::new(Mutex::new(0));
+        let mock = MockPublisher {
+            attempts: attempts.clone(),
+            succeed_after: 2, // Fails 2 times, succeeds on 3rd
+        };
+
+        let config = RetryMiddleware {
+            max_attempts: 5,
+            initial_interval_ms: 1,
+            max_interval_ms: 10,
+            multiplier: 1.0,
+        };
+
+        let retry_publisher = RetryPublisher::new(Box::new(mock), config);
+        let msg = CanonicalMessage::new(vec![], None);
+
+        let result = retry_publisher.send(msg).await;
+        assert!(result.is_ok());
+        assert_eq!(*attempts.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_exhaustion() {
+        let attempts = Arc::new(Mutex::new(0));
+        let mock = MockPublisher {
+            attempts: attempts.clone(),
+            succeed_after: 10,
+        };
+
+        let config = RetryMiddleware {
+            max_attempts: 3,
+            initial_interval_ms: 1,
+            max_interval_ms: 10,
+            multiplier: 1.0,
+        };
+
+        let retry_publisher = RetryPublisher::new(Box::new(mock), config);
+        let msg = CanonicalMessage::new(vec![], None);
+
+        let result = retry_publisher.send(msg).await;
+        assert!(result.is_err());
+        assert_eq!(*attempts.lock().unwrap(), 3);
+    }
+}

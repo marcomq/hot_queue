@@ -41,9 +41,9 @@ impl HttpConsumer {
             .with_state(request_tx);
 
         let listen_address = config
-            .listen_address
+            .url
             .as_deref()
-            .ok_or_else(|| anyhow!("'listen_address' is required for http source connection"))?;
+            .ok_or_else(|| anyhow!("'url' is required for http source connection"))?;
         let addr: SocketAddr = listen_address
             .parse()
             .with_context(|| format!("Invalid listen address: {}", listen_address))?;

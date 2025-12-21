@@ -451,7 +451,6 @@ pub struct HttpEndpoint {
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     pub url: Option<String>,
-    pub listen_address: Option<String>,
     #[serde(default)]
     pub tls: TlsConfig,
     pub response_sink: Option<String>,

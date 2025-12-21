@@ -137,3 +137,54 @@ impl MessageConsumer for DeduplicationConsumer {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoints::memory::MemoryConsumer;
+    use crate::models::{DeduplicationMiddleware, MemoryConfig};
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_deduplication_logic() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("dedup_test").to_str().unwrap().to_string();
+
+        let config = DeduplicationMiddleware {
+            sled_path: db_path,
+            ttl_seconds: 60,
+        };
+
+        let mem_cfg = MemoryConfig {
+            topic: "dedup_topic".to_string(),
+            capacity: Some(10),
+        };
+        let mem_consumer = MemoryConsumer::new(&mem_cfg).unwrap();
+        let channel = mem_consumer.channel();
+
+        // 1. Send a message
+        let msg1 = CanonicalMessage::new(b"data1".to_vec(), Some(100));
+        channel.send_message(msg1).await.unwrap();
+
+        // 2. Send a duplicate message
+        let msg2 = CanonicalMessage::new(b"data1_dup".to_vec(), Some(100));
+        channel.send_message(msg2).await.unwrap();
+
+        // 3. Send a new message
+        let msg3 = CanonicalMessage::new(b"data2".to_vec(), Some(101));
+        channel.send_message(msg3).await.unwrap();
+
+        let mut dedup_consumer =
+            DeduplicationConsumer::new(Box::new(mem_consumer), &config, "test_route").unwrap();
+
+        // First receive: Should be msg1 (ID 100)
+        let (rec1, commit1) = dedup_consumer.receive().await.unwrap();
+        assert_eq!(rec1.message_id, Some(100));
+        commit1(None).await;
+
+        // Second receive: Should be msg3 (ID 101). msg2 (ID 100) is skipped internally.
+        let (rec2, commit2) = dedup_consumer.receive().await.unwrap();
+        assert_eq!(rec2.message_id, Some(101));
+        commit2(None).await;
+    }
+}
