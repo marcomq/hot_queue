@@ -130,24 +130,18 @@ impl MessagePublisher for KafkaPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let mut record = FutureRecord::to(&self.topic).payload(&message.payload[..]);
 
-        if let Some(metadata) = &message.metadata {
-            if !metadata.is_empty() {
-                let mut headers = OwnedHeaders::new();
-                for (key, value) in metadata {
-                    headers = headers.insert(rdkafka::message::Header {
-                        key,
-                        value: Some(value.as_bytes()),
-                    });
-                }
-                record = record.headers(headers);
+        if !message.metadata.is_empty() {
+            let mut headers = OwnedHeaders::new();
+            for (key, value) in &message.metadata {
+                headers = headers.insert(rdkafka::message::Header {
+                    key,
+                    value: Some(value.as_bytes()),
+                });
             }
+            record = record.headers(headers);
         }
 
-        let key = if let Some(id) = message.message_id {
-            id.to_be_bytes().to_vec()
-        } else {
-            uuid::Uuid::new_v4().as_bytes().to_vec()
-        };
+        let key = message.message_id.to_be_bytes().to_vec();
         record = record.key(&key);
 
         if !self.delayed_ack {
@@ -365,7 +359,7 @@ fn process_message(
                     String::from_utf8_lossy(header.value.unwrap_or_default()).to_string(),
                 );
             }
-            canonical_message.metadata = Some(metadata);
+            canonical_message.metadata = metadata;
         }
     }
     messages.push(canonical_message);

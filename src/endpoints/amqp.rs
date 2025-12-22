@@ -67,17 +67,15 @@ impl MessagePublisher for AmqpPublisher {
             // Delivery mode 2 makes the message persistent
             BasicProperties::default().with_delivery_mode(2)
         };
-        if let Some(metadata) = message.metadata {
-            if !metadata.is_empty() {
-                let mut table = FieldTable::default();
-                for (key, value) in metadata {
-                    table.insert(
-                        ShortString::from(key),
-                        lapin::types::AMQPValue::LongString(value.into()),
-                    );
-                }
-                properties = properties.with_headers(table);
+        if !message.metadata.is_empty() {
+            let mut table = FieldTable::default();
+            for (key, value) in message.metadata {
+                table.insert(
+                    ShortString::from(key),
+                    lapin::types::AMQPValue::LongString(value.into()),
+                );
             }
+            properties = properties.with_headers(table);
         }
 
         let confirmation = self
@@ -232,7 +230,7 @@ fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> Canonic
                 metadata.insert(key.to_string(), value_str);
             }
             if !metadata.is_empty() {
-                canonical_message.metadata = Some(metadata);
+                canonical_message.metadata = metadata;
             }
         }
     }

@@ -153,7 +153,7 @@ async fn handle_request(
             metadata.insert(key.as_str().to_string(), value_str.to_string());
         }
     }
-    message.metadata = Some(metadata);
+    message.metadata = metadata;
 
     let message_for_sink = if state.response_sink.is_some() {
         Some(message.clone())
@@ -214,9 +214,7 @@ fn make_response(message: Option<CanonicalMessage>) -> Response {
             StatusCode::OK,
             [(
                 axum::http::header::CONTENT_TYPE,
-                msg.metadata
-                    .as_ref()
-                    .and_then(|m| m.get("content-type"))
+                msg.metadata.get("content-type")
                     .map(|s| s.as_str())
                     .unwrap_or("application/json"),
             )],
@@ -232,7 +230,7 @@ fn make_response(message: Option<CanonicalMessage>) -> Response {
 pub struct HttpPublisher {
     client: reqwest::Client,
     url: String,
-    response_sink: Option<Arc<dyn MessagePublisher>>,
+    response_out: Option<Arc<dyn MessagePublisher>>,
 }
 
 impl HttpPublisher {
@@ -257,7 +255,7 @@ impl HttpPublisher {
         Ok(Self {
             client: client_builder.build()?,
             url: config.url.clone().unwrap_or_default(),
-            response_sink,
+            response_out: response_sink,
         })
     }
 
@@ -265,7 +263,7 @@ impl HttpPublisher {
         Self {
             client: self.client.clone(),
             url: url.to_string(),
-            response_sink: self.response_sink.clone(),
+            response_out: self.response_out.clone(),
         }
     }
 }
@@ -274,10 +272,8 @@ impl HttpPublisher {
 impl MessagePublisher for HttpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let mut request_builder = self.client.post(&self.url);
-        if let Some(metadata) = &message.metadata {
-            for (key, value) in metadata {
-                request_builder = request_builder.header(key, value);
-            }
+        for (key, value) in &message.metadata {
+            request_builder = request_builder.header(key, value);
         }
 
         let response = request_builder
@@ -305,16 +301,16 @@ impl MessagePublisher for HttpPublisher {
         }
 
         // If a response sink is configured, wrap the response in a CanonicalMessage
-        if let Some(sink) = &self.response_sink {
-            let mut response_message = CanonicalMessage::new(response_bytes, message.message_id);
+        if let Some(sink) = &self.response_out {
+            let mut response_message = CanonicalMessage::new(response_bytes, Some(message.message_id));
             if !response_metadata.is_empty() {
-                response_message.metadata = Some(response_metadata);
+                response_message.metadata = response_metadata;
             }
             sink.send(response_message).await?;
             Ok(None)
         } else {
-            let mut response_message = CanonicalMessage::new(response_bytes, message.message_id);
-            response_message.metadata = Some(response_metadata);
+            let mut response_message = CanonicalMessage::new(response_bytes, Some(message.message_id));
+            response_message.metadata = response_metadata;
             Ok(Some(response_message))
         }
     }

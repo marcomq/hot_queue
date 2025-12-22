@@ -39,7 +39,7 @@ lapin = { version = "3.7", features = ["rustls"], optional = true }
 
 # MongoDB
 mongodb = { version = "3.4", optional = true }
-uuid = { version = "1.19", features = ["v4"], optional = true }
+uuid = { version = "1.19", features = ["v7"]}
 
 # NATS
 async-nats = { version = "0.45", optional = true }
@@ -61,7 +61,7 @@ once_cell = { version = "1.21.3"  }
 
 [features]
 default = ["full"]
-full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "file", "metrics", "dedup"]
+full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http",  "metrics", "dedup"]
 
 # Functionality features
 dedup = ["sled"]
@@ -71,14 +71,13 @@ metrics = ["dep:metrics"]
 # Endpoint features
 kafka = ["rdkafka", "async-stream"]
 amqp = ["lapin", "rustls", "rustls-pemfile", "url"]
-nats = ["async-nats", "rustls", "rustls-pemfile", "uuid"]
-mongodb = ["dep:mongodb", "uuid"]
+nats = ["async-nats", "rustls", "rustls-pemfile"]
+mongodb = ["dep:mongodb"]
 mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "url"]
 http = ["axum", "reqwest", "axum-server", "rustls", "tokio-rustls", "rustls-pemfile"]
-file = [] # No extra deps
 
 [dev-dependencies]
-uuid = { version = "1.19", features = ["v4"] }
+uuid = { version = "1.19", features = ["v4", "v7"]}
 serde_yaml_ng = "0.10.0"
 tempfile = "3.10"
 tracing-appender = "0.2"

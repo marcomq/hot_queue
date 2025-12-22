@@ -66,9 +66,9 @@ impl NatsPublisher {
 #[async_trait]
 impl MessagePublisher for NatsPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let headers = if let Some(metadata) = &message.metadata {
+        let headers = if !message.metadata.is_empty() {
             let mut headers = HeaderMap::new();
-            for (key, value) in metadata {
+            for (key, value) in &message.metadata {
                 headers.insert(key.as_str(), value.as_str());
             }
             headers
@@ -212,7 +212,7 @@ impl NatsConsumer {
                         metadata.insert(key.to_string(), first_value.to_string());
                     }
                 }
-                canonical_message.metadata = Some(metadata);
+                canonical_message.metadata = metadata;
             }
         }
         canonical_message

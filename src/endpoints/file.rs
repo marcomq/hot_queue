@@ -61,14 +61,19 @@ impl MessagePublisher for FilePublisher {
 
         // Iterate over messages, consuming them
         for msg in messages {
-            if writer.write_all(&msg.payload).await.is_err()
-                || writer.write_all(b"\n").await.is_err()
-            {
+            let serialized_msg = match serde_json::to_vec(&msg) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to serialize message for file sink: {}", e);
+                    failed_messages.push(msg);
+                    continue;
+                }
+            };
+            if writer.write_all(&serialized_msg).await.is_err() || writer.write_all(b"\n").await.is_err() {
                 // If write fails, add the message to the failed list
                 failed_messages.push(msg);
-            }
-            else {
-                tracing::trace!(payload_len = %msg.payload.len(), "Writing message to file");
+            } else {
+                tracing::trace!(payload_len = %serialized_msg.len(), "Writing message to file");
             }
         }
 
@@ -124,11 +129,9 @@ impl MessageConsumer for FileConsumer {
             return Err(anyhow!("End of file reached: {}", self.path));
         }
 
-        // Trim the newline character that read_until includes
-        if buffer.ends_with(b"\n") {
-            buffer.pop();
-        }
-        let message = CanonicalMessage::new(buffer, None);
+        let message: CanonicalMessage = serde_json::from_slice(&buffer).with_context(|| {
+            format!("Failed to deserialize message from file: {}", String::from_utf8_lossy(&buffer))
+        })?;
 
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);
@@ -179,6 +182,7 @@ mod tests {
         // 5. Receive the messages and verify them
         let (received_msg1, commit1) = source.receive().await.unwrap();
         commit1(None).await; // Commit is a no-op, but we should call it
+        
         assert_eq!(received_msg1.message_id, msg1.message_id);
         assert_eq!(received_msg1.payload, msg1.payload);
 

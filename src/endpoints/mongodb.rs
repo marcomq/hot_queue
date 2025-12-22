@@ -5,7 +5,6 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::StreamExt;
 use mongodb::{
-    bson::oid::ObjectId,
     bson::{doc, to_document, Binary, Bson, Document},
     change_stream::ChangeStream,
     error::ErrorKind,
@@ -23,7 +22,8 @@ use tracing::{info, warn};
 /// The payload is read as a BSON Binary type, which we then manually convert.
 #[derive(Serialize, Deserialize, Debug)]
 struct MongoMessageRaw {
-    message_id: Option<Binary>,
+    #[serde(rename = "_id")]
+    id: mongodb::bson::Uuid,
     payload: Binary,
     metadata: Option<Document>,
 }
@@ -32,19 +32,14 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
     type Error = anyhow::Error;
 
     fn try_from(raw: MongoMessageRaw) -> Result<Self, Self::Error> {
-        let metadata: Option<HashMap<String, String>> = raw
+        let metadata: HashMap<String, String> = raw
             .metadata
             .map(mongodb::bson::from_document)
             .transpose()
-            .context("Failed to deserialize metadata from BSON document")?;
+            .context("Failed to deserialize metadata from BSON document")?
+            .unwrap_or_default();
 
-        let message_id = raw.message_id.map(|bin| {
-            let mut bytes = [0u8; 16];
-            let len = bin.bytes.len();
-            let copy_len = len.min(16);
-            bytes[16 - copy_len..16].copy_from_slice(&bin.bytes[0..copy_len]);
-            u128::from_be_bytes(bytes)
-        });
+        let message_id = u128::from_be_bytes(raw.id.bytes());
 
         Ok(CanonicalMessage {
             message_id,
@@ -72,33 +67,13 @@ impl MongoDbPublisher {
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let (object_id, message_id_bin) = if let Some(message_id) = &message.message_id {
-            // An ObjectId is 12 bytes. A u128 is 16 bytes. We use the last 12 bytes
-            // of the message_id to construct the ObjectId, as they are more likely to be unique.
-            // NOTE: This discards the high 4 bytes of the message_id. If two message_ids differ
-            // only in the high 4 bytes, they will result in the same ObjectId, potentially causing
-            // a duplicate key error on insert if _id uniqueness is enforced.
-            let bin_id = message_id.to_be_bytes();
-            let id_bytes: [u8; 12] = bin_id[4..].try_into()?;
-            let oid = mongodb::bson::oid::ObjectId::from(id_bytes);
-            (oid, bin_id)
-        } else {
-            let oid = mongodb::bson::oid::ObjectId::new();
-            let mut id_bytes = [0u8; 16];
-            id_bytes[4..16].copy_from_slice(&oid.bytes());
-            (oid, id_bytes)
-        };
-        let message_id_bin = Bson::Binary(mongodb::bson::Binary {
-            subtype: mongodb::bson::spec::BinarySubtype::Generic,
-            bytes: message_id_bin.to_vec(),
-        });
-        let metadata = to_document(&message.metadata.unwrap_or_default())?;
+        let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
+        let metadata = to_document(&message.metadata)?;
 
         // Manually construct the document to handle u64 message_id for BSON.
         // BSON only supports i64, so we do a wrapping conversion.
         let doc = doc! {
-            "_id": object_id,
-            "message_id": message_id_bin,
+            "_id": id_uuid,
             "payload": Bson::Binary(mongodb::bson::Binary {
                 subtype: mongodb::bson::spec::BinarySubtype::Generic,
                 bytes: message.payload.to_vec() }),
@@ -187,23 +162,23 @@ impl MessageConsumer for MongoDbConsumer {
                 let mut stream = stream_mutex.lock().await;
                 if let Some(event_result) = stream.next().await {
                     let event = event_result.context("Error reading from change stream")?;
-                    if let Some(doc_id) = event
+                    if let Some(id_val) = event
                         .full_document
                         .as_ref()
-                        .and_then(|d| d.get_object_id("_id").ok())
+                        .and_then(|d| d.get("_id"))
                     {
                         // Attempt to claim the specific document from the event.
                         // Retry a few times to handle replication lag/visibility delays.
                         for _ in 0..3 {
                             if let Some(claimed) =
-                                self.try_claim_document(doc! {"_id": doc_id}).await?
+                                self.try_claim_document(doc! {"_id": id_val}).await?
                             {
                                 return Ok(claimed);
                             }
                             tokio::time::sleep(Duration::from_millis(10)).await;
                         }
                         // If we failed, another consumer got it. Log and wait for the next event.
-                        warn!(mongodb_object_id = %doc_id, "Failed to claim document from change stream event after retries. Another consumer may have claimed it.");
+                        warn!(mongodb_id = %id_val, "Failed to claim document from change stream event after retries. Another consumer may have claimed it.");
                     }
                     continue; // Go to the next change stream event
                 } else {
@@ -296,8 +271,10 @@ impl MongoDbConsumer {
         let mut ids_to_claim = Vec::new();
         while let Some(result) = cursor.next().await {
             if let Ok(doc) = result {
-                if let Ok(id) = doc.get_object_id("_id") {
-                    ids_to_claim.push(id);
+                if let Some(Bson::Binary(binary)) = doc.get("_id") {
+                    if let Ok(uuid) = binary.to_uuid() {
+                        ids_to_claim.push(uuid);
+                    }
                 }
             }
         }
@@ -344,7 +321,7 @@ impl MongoDbConsumer {
         let update = doc! { "$set": { "locked_until": locked_until } };
 
         let options = FindOneAndUpdateOptions::builder()
-            .projection(doc! { "message_id": 1, "payload": 1, "metadata": 1, "_id": 1 })
+            .projection(doc! { "_id": 1, "payload": 1, "metadata": 1 })
             .sort(doc! { "_id": 1 }) // Process oldest documents first (FIFO)
             .build();
 
@@ -355,28 +332,28 @@ impl MongoDbConsumer {
             .await
         {
             Ok(Some(doc)) => {
-                let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc.clone())
+                let id_val = doc
+                    .get("_id")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("Document missing _id"))?;
+                let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc)
                     .context("Failed to deserialize MongoDB document")?;
                 let msg: CanonicalMessage = raw_msg.try_into()?;
-
-                let object_id = doc
-                    .get_object_id("_id")
-                    .map_err(|_| anyhow!("Could not find or parse _id in returned document"))?;
 
                 let collection_clone = self.collection.clone();
 
                 let commit = Box::new(move |_response| {
                     Box::pin(async move {
-                        match collection_clone.delete_one(doc! { "_id": object_id }).await {
+                        match collection_clone.delete_one(doc! { "_id": id_val.clone() }).await {
                             Ok(delete_result) => {
                                 if delete_result.deleted_count == 1 {
-                                    tracing::trace!(mongodb_object_id = %object_id, "MongoDB message acknowledged and deleted");
+                                    tracing::trace!(mongodb_id = %id_val, "MongoDB message acknowledged and deleted");
                                 } else {
-                                    warn!(mongodb_object_id = %object_id, "Attempted to ack/delete MongoDB message, but it was not found (already deleted?)");
+                                    warn!(mongodb_id = %id_val, "Attempted to ack/delete MongoDB message, but it was not found (already deleted?)");
                                 }
                             }
                             Err(e) => {
-                                tracing::error!(mongodb_object_id = %object_id, error = %e, "Failed to ack/delete MongoDB message");
+                                tracing::error!(mongodb_id = %id_val, error = %e, "Failed to ack/delete MongoDB message");
                             }
                         }
                     }) as BoxFuture<'static, ()>
@@ -392,13 +369,13 @@ impl MongoDbConsumer {
     /// Retrieves documents by their ObjectIds.
     async fn get_documents_by_ids(
         &self,
-        claimed_ids: &[ObjectId],
+        claimed_ids: &[mongodb::bson::Uuid],
     ) -> anyhow::Result<Vec<Document>> {
         let filter = doc! { "_id": { "$in": claimed_ids } };
         let mut cursor = self
             .collection
             .find(filter)
-            .projection(doc! { "message_id": 1, "payload": 1, "metadata": 1, "_id": 1 })
+            .projection(doc! { "_id": 1, "payload": 1, "metadata": 1 })
             .await?;
 
         let mut documents = Vec::new();
@@ -414,32 +391,33 @@ impl MongoDbConsumer {
         docs: Vec<Document>,
     ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
         let mut messages = Vec::with_capacity(docs.len());
-        let mut object_ids = Vec::with_capacity(docs.len());
+        let mut ids = Vec::with_capacity(docs.len());
 
         for doc in docs {
-            let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc.clone())
+            let id_val = doc
+                .get("_id")
+                .cloned()
+                .ok_or_else(|| anyhow!("Document missing _id"))?;
+            let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc)
                 .context("Failed to deserialize MongoDB document")?;
             let msg: CanonicalMessage = raw_msg.try_into()?;
             messages.push(msg);
 
-            let object_id = doc
-                .get_object_id("_id")
-                .map_err(|_| anyhow!("Could not find or parse _id in returned document"))?;
-            object_ids.push(object_id);
+            ids.push(id_val);
         }
 
         let collection_clone = self.collection.clone();
         let commit = Box::new(move |_response| {
             Box::pin(async move {
-                if object_ids.is_empty() {
+                if ids.is_empty() {
                     return;
                 }
-                let filter = doc! { "_id": { "$in": &object_ids } };
+                let filter = doc! { "_id": { "$in": &ids } };
                 if let Err(e) = collection_clone.delete_many(filter).await {
                     tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
                 } else {
                     tracing::trace!(
-                        count = object_ids.len(),
+                        count = ids.len(),
                         "MongoDB messages acknowledged and deleted"
                     );
                 }

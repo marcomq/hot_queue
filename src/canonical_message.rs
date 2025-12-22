@@ -11,32 +11,23 @@ use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CanonicalMessage {
-    pub message_id: Option<u128>,
+    pub message_id: u128,
     pub payload: Bytes,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
 }
 
 impl CanonicalMessage {
     pub fn new(payload: Vec<u8>, message_id: Option<u128>) -> Self {
         Self {
-            message_id,
+            message_id: message_id.unwrap_or_else(|| Uuid::now_v7().as_u128()),
             payload: Bytes::from(payload),
-            metadata: None,
+            metadata: HashMap::new(),
         }
     }
 
     pub fn set_id(&mut self, id: u128) {
-        self.message_id = Some(id);
-    }
-
-    pub fn gen_id(&mut self) {
-        self.set_id(Uuid::new_v4().as_u128());
-    }
-
-    pub fn with_gen_id(mut self) -> Self {
-        self.gen_id();
-        self
+        self.message_id = id;
     }
 
     pub fn from_json(payload: serde_json::Value) -> Result<Self, serde_json::Error> {
@@ -78,7 +69,7 @@ impl CanonicalMessage {
     }
 
     pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {
-        self.metadata = Some(metadata);
+        self.metadata = metadata;
         self
     }
 }

@@ -43,13 +43,7 @@ impl MessageConsumer for DeduplicationConsumer {
     async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
         loop {
             let (message, commit) = self.inner.receive().await?;
-            let key = match message.message_id {
-                Some(id) => id.to_be_bytes().to_vec(),
-                None => {
-                    // If there's no message_id, we can't deduplicate. Pass it through.
-                    return Ok((message, commit));
-                }
-            };
+            let key = message.message_id.to_be_bytes().to_vec();
 
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             // Atomically insert only if key doesn't exist
@@ -179,12 +173,12 @@ mod tests {
 
         // First receive: Should be msg1 (ID 100)
         let (rec1, commit1) = dedup_consumer.receive().await.unwrap();
-        assert_eq!(rec1.message_id, Some(100));
+        assert_eq!(rec1.message_id, 100);
         commit1(None).await;
 
         // Second receive: Should be msg3 (ID 101). msg2 (ID 100) is skipped internally.
         let (rec2, commit2) = dedup_consumer.receive().await.unwrap();
-        assert_eq!(rec2.message_id, Some(101));
+        assert_eq!(rec2.message_id, 101);
         commit2(None).await;
     }
 }

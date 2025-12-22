@@ -124,7 +124,10 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
         match callback(publisher, msg.clone()).await {
             Ok(Some(resp)) => responses.push(resp),
             Ok(None) => {}
-            Err(_) => {
+            Err(err) => {
+                if responses.is_empty() {
+                    return Err(err);
+                }
                 failed_messages.push(msg);
             }
         }
