@@ -3,13 +3,11 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::traits::Compute;
 use serde::{
     de::{MapAccess, Visitor},
     Deserialize, Deserializer, Serialize,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
 
@@ -53,32 +51,6 @@ fn default_max_interval_ms() -> u64 {
 }
 fn default_multiplier() -> f64 {
     2.0
-}
-
-#[derive(Clone)]
-pub struct ComputeHandler(pub Arc<dyn Compute>);
-
-impl ComputeHandler {
-    pub fn new(compute: impl Compute + 'static) -> Self {
-        Self(Arc::new(compute))
-    }
-}
-
-impl std::fmt::Debug for ComputeHandler {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ComputeHandler")
-    }
-}
-
-impl<'de> Deserialize<'de> for ComputeHandler {
-    fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Err(serde::de::Error::custom(
-            "ComputeHandler cannot be deserialized from config",
-        ))
-    }
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
@@ -224,8 +196,6 @@ pub enum Middleware {
     Dlq(Box<DeadLetterQueueMiddleware>),
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
-    #[serde(skip)]
-    Compute(ComputeHandler),
 }
 
 /// Deduplication middleware configuration.
@@ -565,7 +535,6 @@ kafka_to_nats:
                     assert!((rp.probability - 0.1).abs() < f64::EPSILON);
                     has_random_panic = true;
                 }
-                Middleware::Compute(_) => panic!("Compute middleware cannot be deserialized"),
             }
         }
 

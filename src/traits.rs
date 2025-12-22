@@ -7,7 +7,24 @@ use crate::CanonicalMessage;
 use async_trait::async_trait;
 pub use futures::future::BoxFuture;
 use std::any::Any;
-use std::future::Future;
+
+/// A trait for handling commands.
+///
+/// Command handlers process an incoming message and can optionally return a new
+/// message, for example, as a reply or a resulting event to be published.
+#[async_trait]
+pub trait CommandHandler: Send + Sync {
+    async fn handle(&self, msg: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>>;
+}
+
+/// A trait for handling events.
+///
+/// Event handlers process an incoming message. They are not expected to return a
+/// direct response.
+#[async_trait]
+pub trait EventHandler: Send + Sync {
+    async fn handle(&self, msg: CanonicalMessage) -> anyhow::Result<()>;
+}
 
 /// A closure that can be called to commit the message.
 /// It returns a `BoxFuture` to allow for async commit operations.
@@ -17,29 +34,6 @@ pub type CommitFunc =
 /// A closure for committing a batch of messages.
 pub type BatchCommitFunc =
     Box<dyn FnOnce(Option<Vec<CanonicalMessage>>) -> BoxFuture<'static, ()> + Send + 'static>;
-
-/// Converts a `BatchCommitFunc` into a `CommitFunc` by wrapping it.
-/// This allows a function that commits a batch of messages to be used where a
-/// function that commits a single message is expected.
-pub fn into_commit_func(batch_commit: BatchCommitFunc) -> CommitFunc {
-    Box::new(move |response: Option<CanonicalMessage>| {
-        let single_response_vec = response.map(|resp| vec![resp]);
-        batch_commit(single_response_vec)
-    })
-}
-
-/// Converts a `CommitFunc` into a `BatchCommitFunc` by wrapping it.
-/// This allows a function that commits a single message to be used where a
-/// function that commits a batch of messages is expected. It does so by
-pub fn into_batch_commit_func(commit: CommitFunc) -> BatchCommitFunc {
-    Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
-        if let Some(resp_vec) = &responses {
-            debug_assert!(resp_vec.len() == 1);
-        };
-        let single_response = responses.and_then(|resp_vec| resp_vec.into_iter().next());
-        commit(single_response)
-    })
-}
 
 #[async_trait]
 pub trait MessageConsumer: Send + Sync {
@@ -142,18 +136,25 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
     Ok((responses, failed_messages))
 }
 
-#[async_trait]
-pub trait Compute: Send + Sync {
-    async fn run(&self, msg: CanonicalMessage) -> anyhow::Result<CanonicalMessage>;
+/// Converts a `BatchCommitFunc` into a `CommitFunc` by wrapping it.
+/// This allows a function that commits a batch of messages to be used where a
+/// function that commits a single message is expected.
+pub fn into_commit_func(batch_commit: BatchCommitFunc) -> CommitFunc {
+    Box::new(move |response: Option<CanonicalMessage>| {
+        let single_response_vec = response.map(|resp| vec![resp]);
+        batch_commit(single_response_vec)
+    })
 }
 
-#[async_trait]
-impl<F, Fut> Compute for F
-where
-    F: Fn(CanonicalMessage) -> Fut + Send + Sync,
-    Fut: Future<Output = anyhow::Result<CanonicalMessage>> + Send,
-{
-    async fn run(&self, msg: CanonicalMessage) -> anyhow::Result<CanonicalMessage> {
-        self(msg).await
-    }
+/// Converts a `CommitFunc` into a `BatchCommitFunc` by wrapping it.
+/// This allows a function that commits a single message to be used where a
+/// function that commits a batch of messages is expected. It does so by
+pub fn into_batch_commit_func(commit: CommitFunc) -> BatchCommitFunc {
+    Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+        if let Some(resp_vec) = &responses {
+            debug_assert!(resp_vec.len() == 1);
+        };
+        let single_response = responses.and_then(|resp_vec| resp_vec.into_iter().next());
+        commit(single_response)
+    })
 }
