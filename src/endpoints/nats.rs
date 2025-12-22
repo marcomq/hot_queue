@@ -1,7 +1,7 @@
 use crate::models::NatsConfig;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher,
-    PublisherError, ReceivedBatch, SendBatchOutcome, SendOutcome,
+    PublisherError, Received, ReceivedBatch, SendBatchOutcome, SendOutcome,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -229,7 +229,7 @@ impl NatsConsumer {
 
 #[async_trait]
 impl MessageConsumer for NatsConsumer {
-    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         let (message, commit) = match &mut self.subscription {
             NatsSubscription::JetStream(stream) => {
                 let message = futures::StreamExt::next(stream)
@@ -259,7 +259,7 @@ impl MessageConsumer for NatsConsumer {
             }
         };
 
-        Ok((message, commit))
+        Ok(Received { message, commit })
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {

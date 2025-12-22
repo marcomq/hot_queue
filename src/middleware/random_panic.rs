@@ -1,6 +1,6 @@
 use crate::models::RandomPanicMiddleware;
 use crate::traits::{
-    CommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
+    ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received, ReceivedBatch,
     SendBatchOutcome, SendOutcome,
 };
 use crate::CanonicalMessage;
@@ -36,7 +36,7 @@ impl RandomPanicConsumer {
 
 #[async_trait]
 impl MessageConsumer for RandomPanicConsumer {
-    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         self.maybe_panic();
         self.inner.receive().await
     }

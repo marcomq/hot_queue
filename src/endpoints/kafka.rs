@@ -1,6 +1,6 @@
 use crate::models::KafkaConfig;
 use crate::traits::{
-    BoxFuture, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
+    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
     ReceivedBatch, SendBatchOutcome, SendOutcome,
 };
 use crate::CanonicalMessage;
@@ -261,7 +261,7 @@ impl Drop for KafkaConsumer {
 
 #[async_trait]
 impl MessageConsumer for KafkaConsumer {
-    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         let message = self
             .consumer
             .recv()
@@ -283,7 +283,10 @@ impl MessageConsumer for KafkaConsumer {
             }) as BoxFuture<'static, ()>
         });
 
-        Ok((canonical_message, commit))
+        Ok(Received {
+            message: canonical_message,
+            commit,
+        })
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {

@@ -1,4 +1,4 @@
-use crate::traits::BatchCommitFunc;
+use crate::traits::{BatchCommitFunc, CommitFunc};
 use crate::CanonicalMessage;
 
 /// The outcome of a successful command handling operation.
@@ -30,6 +30,21 @@ pub enum SendBatchOutcome {
         responses: Option<Vec<CanonicalMessage>>,
         failed: Vec<CanonicalMessage>,
     },
+}
+
+/// A successfully received single message.
+pub struct Received {
+    pub message: CanonicalMessage,
+    pub commit: CommitFunc,
+}
+
+impl std::fmt::Debug for Received {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Received")
+            .field("message", &self.message)
+            .field("commit", &"<CommitFunc>")
+            .finish()
+    }
 }
 
 /// A successfully received batch of messages.

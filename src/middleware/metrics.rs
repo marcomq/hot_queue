@@ -4,7 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::models::MetricsMiddleware;
 use crate::traits::{
-    CommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
+    ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received, ReceivedBatch,
     SendBatchOutcome, SendOutcome,
 };
 use crate::CanonicalMessage;
@@ -101,7 +101,7 @@ impl MetricsConsumer {
 
 #[async_trait]
 impl MessageConsumer for MetricsConsumer {
-    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         let start = Instant::now();
         let result = self.inner.receive().await?;
         let duration = start.elapsed();

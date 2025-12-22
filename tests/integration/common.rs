@@ -1,10 +1,8 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
 use chrono;
-use mq_bridge::traits::{BatchCommitFunc, MessagePublisher};
-use mq_bridge::traits::{
-    CommitFunc, ConsumerError, MessageConsumer, ReceivedBatch, SendBatchOutcome,
-};
+use mq_bridge::traits::{ConsumerError, MessageConsumer, ReceivedBatch, SendBatchOutcome};
+use mq_bridge::traits::{MessagePublisher, Received};
 use mq_bridge::{CanonicalMessage, Route};
 use once_cell::sync::Lazy;
 use serde_json::json;
@@ -492,7 +490,7 @@ pub struct MockConsumer;
 
 #[async_trait::async_trait]
 impl MessageConsumer for MockConsumer {
-    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         // This consumer will block forever, which is fine for tests that only need a publisher.
         // It prevents the route from exiting immediately.
         tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -662,8 +660,10 @@ pub async fn measure_single_read_performance(
         }
         let mut consumer_guard = consumer.lock().await;
         let receive_future = consumer_guard.receive();
-        if let Ok(Ok((_msg, commit))) =
-            tokio::time::timeout(Duration::from_secs(5), receive_future).await
+        if let Ok(Ok(Received {
+            message: _msg,
+            commit,
+        })) = tokio::time::timeout(Duration::from_secs(5), receive_future).await
         {
             final_count += 1;
             tokio::spawn(async move { commit(None).await });

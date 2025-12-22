@@ -4,9 +4,8 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::models::DeduplicationMiddleware;
 use crate::traits::{
-    into_batch_commit_func, CommitFunc, ConsumerError, MessageConsumer, ReceivedBatch,
+    into_batch_commit_func, ConsumerError, MessageConsumer, Received, ReceivedBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::Context;
 use async_trait::async_trait;
 use sled::Db;
@@ -43,9 +42,11 @@ impl DeduplicationConsumer {
 #[async_trait]
 impl MessageConsumer for DeduplicationConsumer {
     #[instrument(skip_all)]
-    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         loop {
-            let (message, commit) = self.inner.receive().await?;
+            let received = self.inner.receive().await?;
+            let message = received.message;
+            let commit = received.commit;
             let key = message.message_id.to_be_bytes().to_vec();
 
             let now = SystemTime::now()
@@ -120,7 +121,7 @@ impl MessageConsumer for DeduplicationConsumer {
                 });
             }
 
-            return Ok((message, commit));
+            return Ok(Received { message, commit });
         }
     }
 
@@ -128,10 +129,10 @@ impl MessageConsumer for DeduplicationConsumer {
         &mut self,
         _max_messages: usize,
     ) -> Result<ReceivedBatch, ConsumerError> {
-        let (msg, commit) = self.receive().await?;
-        let commit = into_batch_commit_func(commit);
+        let received = self.receive().await?;
+        let commit = into_batch_commit_func(received.commit);
         Ok(ReceivedBatch {
-            messages: vec![msg],
+            messages: vec![received.message],
             commit,
         })
     }
@@ -146,6 +147,7 @@ mod tests {
     use super::*;
     use crate::endpoints::memory::MemoryConsumer;
     use crate::models::{DeduplicationMiddleware, MemoryConfig};
+    use crate::CanonicalMessage;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -181,13 +183,13 @@ mod tests {
             DeduplicationConsumer::new(Box::new(mem_consumer), &config, "test_route").unwrap();
 
         // First receive: Should be msg1 (ID 100)
-        let (rec1, commit1) = dedup_consumer.receive().await.unwrap();
-        assert_eq!(rec1.message_id, 100);
-        commit1(None).await;
+        let rec1 = dedup_consumer.receive().await.unwrap();
+        assert_eq!(rec1.message.message_id, 100);
+        (rec1.commit)(None).await;
 
         // Second receive: Should be msg3 (ID 101). msg2 (ID 100) is skipped internally.
-        let (rec2, commit2) = dedup_consumer.receive().await.unwrap();
-        assert_eq!(rec2.message_id, 101);
-        commit2(None).await;
+        let rec2 = dedup_consumer.receive().await.unwrap();
+        assert_eq!(rec2.message.message_id, 101);
+        (rec2.commit)(None).await;
     }
 }

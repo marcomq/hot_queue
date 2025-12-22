@@ -205,11 +205,11 @@ mod tests {
         let mut source = FileConsumer::new(&file_path_str).await.unwrap();
 
         // 5. Receive the messages and verify them
-        let (received_msg1, commit1) = source.receive().await.unwrap();
-        commit1(None).await; // Commit is a no-op, but we should call it
+        let received1 = source.receive().await.unwrap();
+        (received1.commit)(None).await; // Commit is a no-op, but we should call it
 
-        assert_eq!(received_msg1.message_id, msg1.message_id);
-        assert_eq!(received_msg1.payload, msg1.payload);
+        assert_eq!(received1.message.message_id, msg1.message_id);
+        assert_eq!(received1.message.payload, msg1.payload);
 
         let batch = source.receive_batch(1).await.unwrap();
         let (received_msgs, commit2) = (batch.messages, batch.commit);

@@ -1,7 +1,7 @@
 use crate::models::MongoDbConfig;
 use crate::traits::{
-    BatchCommitFunc, BoxFuture, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher,
-    PublisherError, ReceivedBatch, SendBatchOutcome, SendOutcome,
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
+    Received, ReceivedBatch, SendBatchOutcome, SendOutcome,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -161,7 +161,7 @@ impl MongoDbConsumer {
 
 #[async_trait]
 impl MessageConsumer for MongoDbConsumer {
-    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         loop {
             // This outer loop handles both polling and change stream logic.
             if let Some(stream_mutex) = &self.change_stream {
@@ -203,10 +203,10 @@ impl MessageConsumer for MongoDbConsumer {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         loop {
             if self.change_stream.is_some() {
-                let (msg, commit) = self.receive().await?;
-                let commit_batch = Box::new(move |_response| commit(None));
+                let received = self.receive().await?;
+                let commit_batch = Box::new(move |_response| (received.commit)(None));
                 return Ok(ReceivedBatch {
-                    messages: vec![msg],
+                    messages: vec![received.message],
                     commit: commit_batch,
                 });
             }
@@ -310,10 +310,7 @@ impl MongoDbConsumer {
     /// Atomically finds and locks a document matching the filter.
     /// If the filter is empty, it finds any available document.
     /// If a document is successfully claimed, it returns the message and commit function.
-    async fn try_claim_document(
-        &self,
-        extra_filter: Document,
-    ) -> anyhow::Result<Option<(CanonicalMessage, CommitFunc)>> {
+    async fn try_claim_document(&self, extra_filter: Document) -> anyhow::Result<Option<Received>> {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs() as i64;
@@ -367,7 +364,10 @@ impl MongoDbConsumer {
                     }) as BoxFuture<'static, ()>
                 });
 
-                Ok(Some((msg, commit)))
+                Ok(Some(Received {
+                    message: msg,
+                    commit,
+                }))
             }
             Ok(None) => Ok(None), // No document found or claimed
             Err(e) => Err(e.into()),

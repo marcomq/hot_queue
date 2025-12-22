@@ -436,11 +436,11 @@ http_route:
 
         // Spawn a task to handle the receiving side
         let receive_task = tokio::spawn(async move {
-            let (received_msg, commit) = consumer.receive().await.expect("Failed to receive");
+            let received = consumer.receive().await.expect("Failed to receive");
             // Send a response back via commit
             let response_msg = CanonicalMessage::new(b"response_payload".to_vec(), None);
-            commit(Some(response_msg)).await;
-            received_msg
+            (received.commit)(Some(response_msg)).await;
+            received.message
         });
 
         // Publisher sends
@@ -487,9 +487,9 @@ http_route:
 
         tokio::spawn(async move {
             loop {
-                if let Ok((_, commit)) = consumer.receive().await {
+                if let Ok(received) = consumer.receive().await {
                     let response_msg = CanonicalMessage::new(b"server_reply".to_vec(), None);
-                    commit(Some(response_msg)).await;
+                    (received.commit)(Some(response_msg)).await;
                 }
             }
         });
@@ -557,13 +557,14 @@ http_route:
 
         // 3. Emulate the route logic in a separate task
         tokio::spawn(async move {
-            if let Ok((request_msg, commit)) = consumer.receive().await {
-                let static_response_outcome = static_publisher.send(request_msg).await.unwrap();
+            if let Ok(received) = consumer.receive().await {
+                let static_response_outcome =
+                    static_publisher.send(received.message).await.unwrap();
                 let pipeline_response = match static_response_outcome {
                     SendOutcome::Response(msg) => Some(msg),
                     SendOutcome::Ack => None,
                 };
-                commit(pipeline_response).await;
+                (received.commit)(pipeline_response).await;
             }
         });
 

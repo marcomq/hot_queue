@@ -4,7 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 pub use crate::errors::{ConsumerError, HandlerError, PublisherError};
-pub use crate::outcomes::{HandlerOutcome, ReceivedBatch, SendBatchOutcome, SendOutcome};
+pub use crate::outcomes::{HandlerOutcome, Received, ReceivedBatch, SendBatchOutcome, SendOutcome};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 pub use futures::future::BoxFuture;
@@ -46,14 +46,17 @@ pub trait MessageConsumer: Send + Sync {
         -> Result<ReceivedBatch, ConsumerError>;
 
     /// Receives a single message.
-    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         // This default implementation ensures we get exactly one message,
         // looping if the underlying batch consumer returns an empty batch.
         loop {
             let mut batch = self.receive_batch(1).await?;
             if let Some(msg) = batch.messages.pop() {
                 debug_assert!(batch.messages.is_empty());
-                return Ok((msg, into_commit_func(batch.commit)));
+                return Ok(Received {
+                    message: msg,
+                    commit: into_commit_func(batch.commit),
+                });
             }
             // Batch was success but empty, which is unexpected for receive(1). Loop.
         }
@@ -63,14 +66,14 @@ pub trait MessageConsumer: Send + Sync {
         &mut self,
         _max_messages: usize,
     ) -> Result<ReceivedBatch, ConsumerError> {
-        let (msg, single_commit) = self.receive().await?; // The `?` now correctly handles ConsumerError
+        let received = self.receive().await?; // The `?` now correctly handles ConsumerError
         let batch_commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
             // The default implementation only handles one message, so we take the first response.
             let single_response = responses.and_then(|v| v.into_iter().next());
-            single_commit(single_response)
+            (received.commit)(single_response)
         }) as BatchCommitFunc;
         Ok(ReceivedBatch {
-            messages: vec![msg],
+            messages: vec![received.message],
             commit: batch_commit,
         })
     }

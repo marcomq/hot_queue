@@ -1,7 +1,7 @@
 use crate::models::MqttConfig;
 use crate::traits::{
-    into_batch_commit_func, BoxFuture, CommitFunc, ConsumerError, MessageConsumer,
-    MessagePublisher, PublisherError, ReceivedBatch, SendBatchOutcome, SendOutcome,
+    into_batch_commit_func, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher,
+    PublisherError, Received, ReceivedBatch, SendBatchOutcome, SendOutcome,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -131,7 +131,7 @@ impl Drop for MqttConsumer {
 
 #[async_trait]
 impl MessageConsumer for MqttConsumer {
-    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         let p = self
             .message_rx
             .recv()
@@ -152,17 +152,20 @@ impl MessageConsumer for MqttConsumer {
             }) as BoxFuture<'static, ()>
         });
 
-        Ok((canonical_message, commit))
+        Ok(Received {
+            message: canonical_message,
+            commit,
+        })
     }
 
     async fn receive_batch(
         &mut self,
         _max_messages: usize,
     ) -> Result<ReceivedBatch, ConsumerError> {
-        let (msg, commit) = self.receive().await?;
-        let commit = into_batch_commit_func(commit);
+        let received = self.receive().await?;
+        let commit = into_batch_commit_func(received.commit);
         Ok(ReceivedBatch {
-            messages: vec![msg],
+            messages: vec![received.message],
             commit,
         })
     }

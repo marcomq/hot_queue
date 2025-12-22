@@ -3,8 +3,8 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::traits::{
-    into_batch_commit_func, BoxFuture, CommitFunc, ConsumerError, MessageConsumer,
-    MessagePublisher, PublisherError, ReceivedBatch, SendBatchOutcome, SendOutcome,
+    into_batch_commit_func, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher,
+    PublisherError, Received, ReceivedBatch, SendBatchOutcome, SendOutcome,
 };
 use crate::CanonicalMessage;
 use anyhow::Context;
@@ -71,22 +71,22 @@ impl StaticRequestConsumer {
 
 #[async_trait]
 impl MessageConsumer for StaticRequestConsumer {
-    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         let message = CanonicalMessage::new(self.content.as_bytes().to_vec(), None);
         let commit = Box::new(|_response: Option<CanonicalMessage>| {
             Box::pin(async {}) as BoxFuture<'static, ()>
         });
-        Ok((message, commit))
+        Ok(Received { message, commit })
     }
 
     async fn receive_batch(
         &mut self,
         _max_messages: usize,
     ) -> Result<ReceivedBatch, ConsumerError> {
-        let (msg, commit) = self.receive().await?;
-        let commit = into_batch_commit_func(commit);
+        let received = self.receive().await?;
+        let commit = into_batch_commit_func(received.commit);
         Ok(ReceivedBatch {
-            messages: vec![msg],
+            messages: vec![received.message],
             commit,
         })
     }
@@ -122,8 +122,8 @@ mod tests {
         let content = "static_message";
         let mut consumer = StaticRequestConsumer::new(content).unwrap();
 
-        let (msg, _commit) = consumer.receive().await.unwrap();
-        assert_eq!(msg.payload, content.as_bytes());
+        let received = consumer.receive().await.unwrap();
+        assert_eq!(received.message.payload, content.as_bytes());
     }
 
     #[test]

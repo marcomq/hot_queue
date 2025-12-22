@@ -234,9 +234,9 @@ mod tests {
 
         sleep(std::time::Duration::from_millis(10)).await;
         // Receive it with the consumer
-        let (received_msg, commit) = consumer.receive().await.unwrap();
-        commit(None).await;
-        assert_eq!(received_msg.payload, msg.payload);
+        let received = consumer.receive().await.unwrap();
+        (received.commit)(None).await;
+        assert_eq!(received.message.payload, msg.payload);
         assert_eq!(consumer.channel().len(), 0);
     }
 
@@ -264,9 +264,9 @@ mod tests {
         assert_eq!(publisher.channel().len(), 2);
 
         // 5. Receive the messages and verify them
-        let (received_msg1, commit1) = consumer.receive().await.unwrap();
-        commit1(None).await;
-        assert_eq!(received_msg1.payload, msg1.payload);
+        let received1 = consumer.receive().await.unwrap();
+        (received1.commit)(None).await;
+        assert_eq!(received1.message.payload, msg1.payload);
 
         let batch2 = consumer.receive_batch(1).await.unwrap();
         let (received_msg2, commit2) = (batch2.messages, batch2.commit);
