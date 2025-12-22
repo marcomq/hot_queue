@@ -5,9 +5,11 @@
 pub mod canonical_message;
 pub mod command_handler;
 pub mod endpoints;
+pub mod errors;
 pub mod event_handler;
 pub mod middleware;
 pub mod models;
+pub mod outcomes;
 pub mod route;
 pub mod traits;
 

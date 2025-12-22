@@ -3,20 +3,22 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::traits::{EventHandler, MessagePublisher, send_batch_helper};
+use crate::errors::{HandlerError, PublisherError};
+use crate::traits::{send_batch_helper, EventHandler, MessagePublisher};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::future::Future;
 use std::sync::Arc;
 
+use crate::traits::{SendBatchOutcome, SendOutcome};
 #[async_trait]
 impl<F, Fut> EventHandler for F
 where
     F: Fn(CanonicalMessage) -> Fut + Send + Sync,
-    Fut: Future<Output = anyhow::Result<()>> + Send,
+    Fut: Future<Output = Result<(), HandlerError>> + Send,
 {
-    async fn handle(&self, msg: CanonicalMessage) -> anyhow::Result<()> {
+    async fn handle(&self, msg: CanonicalMessage) -> Result<(), HandlerError> {
         self(msg).await
     }
 }
@@ -40,16 +42,17 @@ impl EventHandlerPublisher {
 
 #[async_trait]
 impl MessagePublisher for EventHandlerPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        self.handler.handle(message).await?;
-        // Event handlers do not produce a response, so we return Ok(None).
-        Ok(None)
+    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+        match self.handler.handle(message).await {
+            Ok(()) => Ok(SendOutcome::Ack),
+            Err(e) => Err(e.into()), // Converts HandlerError to PublisherError
+        }
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SendBatchOutcome, PublisherError> {
         send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })

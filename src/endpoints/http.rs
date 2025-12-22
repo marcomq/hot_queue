@@ -4,7 +4,10 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::endpoints::create_publisher_from_route;
 use crate::models::HttpConfig;
-use crate::traits::{BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{
+    BoxFuture, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
+    ReceivedBatch, SendBatchOutcome, SendOutcome,
+};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -116,7 +119,10 @@ impl HttpConsumer {
         });
 
         ready_rx.await?;
-        Ok(Self { request_rx, _shutdown_tx: shutdown_tx })
+        Ok(Self {
+            request_rx,
+            _shutdown_tx: shutdown_tx,
+        })
     }
 }
 
@@ -125,14 +131,17 @@ impl MessageConsumer for HttpConsumer {
     async fn receive_batch(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    ) -> Result<ReceivedBatch, ConsumerError> {
         let (message, commit) = self
             .request_rx
             .recv()
             .await
             .ok_or_else(|| anyhow!("HTTP source channel closed"))?;
 
-        Ok((vec![message], crate::traits::into_batch_commit_func(commit)))
+        Ok(ReceivedBatch {
+            messages: vec![message],
+            commit: crate::traits::into_batch_commit_func(commit),
+        })
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -186,7 +195,10 @@ async fn handle_request(
                 // If a response sink is configured, use it to generate the response.
                 if let Some(sink) = &state.response_sink {
                     match sink.send(message_for_sink.unwrap()).await {
-                        Ok(sink_response) => make_response(sink_response),
+                        Ok(SendOutcome::Response(sink_response)) => {
+                            make_response(Some(sink_response))
+                        }
+                        Ok(SendOutcome::Ack) => make_response(None),
                         Err(e) => (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             format!("Response sink error: {}", e),
@@ -214,7 +226,8 @@ fn make_response(message: Option<CanonicalMessage>) -> Response {
             StatusCode::OK,
             [(
                 axum::http::header::CONTENT_TYPE,
-                msg.metadata.get("content-type")
+                msg.metadata
+                    .get("content-type")
                     .map(|s| s.as_str())
                     .unwrap_or("application/json"),
             )],
@@ -270,7 +283,7 @@ impl HttpPublisher {
 
 #[async_trait]
 impl MessagePublisher for HttpPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
         let mut request_builder = self.client.post(&self.url);
         for (key, value) in &message.metadata {
             request_builder = request_builder.header(key, value);
@@ -290,28 +303,35 @@ impl MessagePublisher for HttpPublisher {
             }
         }
 
-        let response_bytes = response.bytes().await?.to_vec();
+        let response_bytes = response
+            .bytes()
+            .await
+            .context("Failed to read HTTP response body")?
+            .to_vec();
 
         if !response_status.is_success() {
-            return Err(anyhow!(
+            return Err(anyhow::anyhow!(
                 "HTTP sink request failed with status {}: {:?}",
                 response_status,
                 String::from_utf8_lossy(&response_bytes)
-            ));
+            )
+            .into());
         }
 
         // If a response sink is configured, wrap the response in a CanonicalMessage
         if let Some(sink) = &self.response_out {
-            let mut response_message = CanonicalMessage::new(response_bytes, Some(message.message_id));
+            let mut response_message =
+                CanonicalMessage::new(response_bytes, Some(message.message_id));
             if !response_metadata.is_empty() {
                 response_message.metadata = response_metadata;
             }
             sink.send(response_message).await?;
-            Ok(None)
+            Ok(SendOutcome::Ack)
         } else {
-            let mut response_message = CanonicalMessage::new(response_bytes, Some(message.message_id));
+            let mut response_message =
+                CanonicalMessage::new(response_bytes, Some(message.message_id));
             response_message.metadata = response_metadata;
-            Ok(Some(response_message))
+            Ok(SendOutcome::Response(response_message))
         }
     }
 
@@ -319,7 +339,7 @@ impl MessagePublisher for HttpPublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SendBatchOutcome, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })
@@ -330,7 +350,6 @@ impl MessagePublisher for HttpPublisher {
         self
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -397,7 +416,9 @@ http_route:
         };
 
         // Start Consumer (Server)
-        let mut consumer = HttpConsumer::new(&config).await.expect("Failed to create consumer");
+        let mut consumer = HttpConsumer::new(&config)
+            .await
+            .expect("Failed to create consumer");
 
         // Start Publisher (Client)
         let pub_config = HttpConfig {
@@ -405,7 +426,9 @@ http_route:
             tls: Default::default(),
             response_out: None,
         };
-        let publisher = HttpPublisher::new(&pub_config).await.expect("Failed to create publisher");
+        let publisher = HttpPublisher::new(&pub_config)
+            .await
+            .expect("Failed to create publisher");
 
         // Send message
         let msg_payload = b"test_payload".to_vec();
@@ -425,9 +448,10 @@ http_route:
 
         let received_msg = receive_task.await.expect("Receive task failed");
         assert_eq!(received_msg.payload, msg_payload);
-        dbg!(&response);
-        assert!(response.is_some());
-        let response = response.unwrap();
+        let response = match response {
+            SendOutcome::Response(msg) => msg,
+            _ => panic!("Expected response"),
+        };
         assert_eq!(response.payload, b"response_payload".to_vec());
     }
 
@@ -442,7 +466,9 @@ http_route:
             tls: Default::default(),
             response_out: None,
         };
-        let mut consumer = HttpConsumer::new(&config).await.expect("Failed to create consumer");
+        let mut consumer = HttpConsumer::new(&config)
+            .await
+            .expect("Failed to create consumer");
 
         let mem_config = MemoryConfig {
             topic: "reply_sink".to_string(),
@@ -455,7 +481,9 @@ http_route:
             tls: Default::default(),
             response_out: Some(Box::new(sink_endpoint)),
         };
-        let publisher = HttpPublisher::new(&pub_config).await.expect("Failed to create publisher");
+        let publisher = HttpPublisher::new(&pub_config)
+            .await
+            .expect("Failed to create publisher");
 
         tokio::spawn(async move {
             loop {
@@ -492,7 +520,9 @@ http_route:
         };
 
         {
-            let _consumer = HttpConsumer::new(&config).await.expect("Failed to create consumer");
+            let _consumer = HttpConsumer::new(&config)
+                .await
+                .expect("Failed to create consumer");
             // Verify we can connect while consumer is alive
             assert!(tokio::net::TcpStream::connect(&addr).await.is_ok());
         } // consumer is dropped here, triggering shutdown via _shutdown_tx drop
@@ -522,19 +552,28 @@ http_route:
         // 2. Setup a StaticEndpointPublisher
         let static_content = "This is a static response";
         let static_publisher =
-            crate::endpoints::static_endpoint::StaticEndpointPublisher::new(static_content).unwrap();
+            crate::endpoints::static_endpoint::StaticEndpointPublisher::new(static_content)
+                .unwrap();
 
         // 3. Emulate the route logic in a separate task
         tokio::spawn(async move {
             if let Ok((request_msg, commit)) = consumer.receive().await {
-                let static_response = static_publisher.send(request_msg).await.unwrap();
-                commit(static_response).await;
+                let static_response_outcome = static_publisher.send(request_msg).await.unwrap();
+                let pipeline_response = match static_response_outcome {
+                    SendOutcome::Response(msg) => Some(msg),
+                    SendOutcome::Ack => None,
+                };
+                commit(pipeline_response).await;
             }
         });
 
         // 4. Make a request to the server
         let client = reqwest::Client::new();
-        let response = client.post(format!("http://{}", addr)).send().await.unwrap();
+        let response = client
+            .post(format!("http://{}", addr))
+            .send()
+            .await
+            .unwrap();
 
         // 5. Assert the response from the server
         assert_eq!(response.status(), StatusCode::OK);

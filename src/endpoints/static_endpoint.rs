@@ -2,10 +2,12 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
-use crate::traits::MessagePublisher;
-use crate::traits::{into_batch_commit_func, BatchCommitFunc};
-use crate::traits::{BoxFuture, CommitFunc, MessageConsumer};
+use crate::traits::{
+    into_batch_commit_func, BoxFuture, CommitFunc, ConsumerError, MessageConsumer,
+    MessagePublisher, PublisherError, ReceivedBatch, SendBatchOutcome, SendOutcome,
+};
 use crate::CanonicalMessage;
+use anyhow::Context;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::any::Any;
@@ -27,16 +29,17 @@ impl StaticEndpointPublisher {
 
 #[async_trait]
 impl MessagePublisher for StaticEndpointPublisher {
-    async fn send(&self, _message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+    async fn send(&self, _message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
         trace!(response = %self.content, "Sending static response");
-        let payload = serde_json::to_vec(&Value::String(self.content.clone()))?;
-        Ok(Some(CanonicalMessage::new(payload, None)))
+        let payload = serde_json::to_vec(&Value::String(self.content.clone()))
+            .context("Failed to serialize static response to JSON")?;
+        Ok(SendOutcome::Response(CanonicalMessage::new(payload, None)))
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SendBatchOutcome, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })
@@ -68,7 +71,7 @@ impl StaticRequestConsumer {
 
 #[async_trait]
 impl MessageConsumer for StaticRequestConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
         let message = CanonicalMessage::new(self.content.as_bytes().to_vec(), None);
         let commit = Box::new(|_response: Option<CanonicalMessage>| {
             Box::pin(async {}) as BoxFuture<'static, ()>
@@ -79,10 +82,13 @@ impl MessageConsumer for StaticRequestConsumer {
     async fn receive_batch(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    ) -> Result<ReceivedBatch, ConsumerError> {
         let (msg, commit) = self.receive().await?;
         let commit = into_batch_commit_func(commit);
-        Ok((vec![msg], commit))
+        Ok(ReceivedBatch {
+            messages: vec![msg],
+            commit,
+        })
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -103,9 +109,10 @@ mod tests {
         let msg = CanonicalMessage::new(vec![], None);
 
         let response = publisher.send(msg).await.unwrap();
-        assert!(response.is_some());
-        let response_msg = response.unwrap();
-        // The publisher serializes the content as a JSON string
+        let response_msg = match response {
+            SendOutcome::Response(msg) => msg,
+            _ => panic!("Expected response"),
+        };
         let expected_payload = serde_json::to_vec(&Value::String(content.to_string())).unwrap();
         assert_eq!(response_msg.payload, expected_payload);
     }

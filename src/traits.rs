@@ -3,6 +3,8 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+pub use crate::errors::{ConsumerError, HandlerError, PublisherError};
+pub use crate::outcomes::{HandlerOutcome, ReceivedBatch, SendBatchOutcome, SendOutcome};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 pub use futures::future::BoxFuture;
@@ -14,7 +16,7 @@ use std::any::Any;
 /// message, for example, as a reply or a resulting event to be published.
 #[async_trait]
 pub trait CommandHandler: Send + Sync {
-    async fn handle(&self, msg: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>>;
+    async fn handle(&self, msg: CanonicalMessage) -> Result<HandlerOutcome, HandlerError>;
 }
 
 /// A trait for handling events.
@@ -23,7 +25,7 @@ pub trait CommandHandler: Send + Sync {
 /// direct response.
 #[async_trait]
 pub trait EventHandler: Send + Sync {
-    async fn handle(&self, msg: CanonicalMessage) -> anyhow::Result<()>;
+    async fn handle(&self, msg: CanonicalMessage) -> Result<(), HandlerError>;
 }
 
 /// A closure that can be called to commit the message.
@@ -40,35 +42,37 @@ pub trait MessageConsumer: Send + Sync {
     /// Receives a batch of messages. Needs to be implemented.
     /// In doubt, just implement a receive_batch that returns 1 message as vec
     /// Receives a batch of messages.
-    async fn receive_batch(
-        &mut self,
-        _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)>;
+    async fn receive_batch(&mut self, _max_messages: usize)
+        -> Result<ReceivedBatch, ConsumerError>;
 
     /// Receives a single message.
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        let (msg_vec, batch_commit) = self.receive_batch(1).await?;
-        debug_assert!(msg_vec.len() == 1);
-        if let Some(msg) = msg_vec.into_iter().next() {
-            Ok((msg, into_commit_func(batch_commit)))
-        } else {
-            Err(anyhow::anyhow!(
-                "Nothing received, receiver probably closed."
-            ))
+    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+        // This default implementation ensures we get exactly one message,
+        // looping if the underlying batch consumer returns an empty batch.
+        loop {
+            let mut batch = self.receive_batch(1).await?;
+            if let Some(msg) = batch.messages.pop() {
+                debug_assert!(batch.messages.is_empty());
+                return Ok((msg, into_commit_func(batch.commit)));
+            }
+            // Batch was success but empty, which is unexpected for receive(1). Loop.
         }
     }
 
     async fn receive_batch_helper(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
-        let (msg, single_commit) = self.receive().await?;
+    ) -> Result<ReceivedBatch, ConsumerError> {
+        let (msg, single_commit) = self.receive().await?; // The `?` now correctly handles ConsumerError
         let batch_commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
             // The default implementation only handles one message, so we take the first response.
             let single_response = responses.and_then(|v| v.into_iter().next());
             single_commit(single_response)
         }) as BatchCommitFunc;
-        Ok((vec![msg], batch_commit))
+        Ok(ReceivedBatch {
+            messages: vec![msg],
+            commit: batch_commit,
+        })
     }
     fn as_any(&self) -> &dyn Any;
 }
@@ -80,16 +84,26 @@ pub trait MessagePublisher: Send + Sync + 'static {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)>;
+    ) -> Result<SendBatchOutcome, PublisherError>;
 
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let (result_vec, failed_msgs) = self.send_batch(vec![message]).await?;
-        if !failed_msgs.is_empty() {
-            Err(anyhow::anyhow!("Failed to send message"))
-        } else if let Some(result) = result_vec {
-            Ok(result.into_iter().next())
-        } else {
-            Ok(None)
+    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+        match self.send_batch(vec![message]).await {
+            Ok(SendBatchOutcome::Ack) => Ok(SendOutcome::Ack),
+            Ok(SendBatchOutcome::Partial {
+                mut responses,
+                failed,
+            }) => {
+                if !failed.is_empty() {
+                    Err(PublisherError::NonRetryable(anyhow::anyhow!(
+                        "Failed to send single message"
+                    )))
+                } else if let Some(res) = responses.as_mut().and_then(|r| r.pop()) {
+                    Ok(SendOutcome::Response(res))
+                } else {
+                    Ok(SendOutcome::Ack)
+                }
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -104,36 +118,42 @@ pub trait MessagePublisher: Send + Sync + 'static {
 pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
     publisher: &P,
     messages: Vec<CanonicalMessage>,
-    callback: impl for<'a> Fn(
-            &'a P,
-            CanonicalMessage,
-        ) -> BoxFuture<'a, anyhow::Result<Option<CanonicalMessage>>>
+    callback: impl for<'a> Fn(&'a P, CanonicalMessage) -> BoxFuture<'a, Result<SendOutcome, PublisherError>>
         + Send
         + Sync,
-) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+) -> Result<SendBatchOutcome, PublisherError> {
     let mut responses = Vec::new();
     let mut failed_messages = Vec::new();
 
     for msg in messages {
         match callback(publisher, msg.clone()).await {
-            Ok(Some(resp)) => responses.push(resp),
-            Ok(None) => {}
-            Err(err) => {
-                if responses.is_empty() {
-                    return Err(err);
-                }
+            Ok(SendOutcome::Response(resp)) => responses.push(resp),
+            Ok(SendOutcome::Ack) => {}
+            Err(PublisherError::Retryable(e)) => {
+                // A retryable error likely affects the whole connection.
+                // Abort the batch and propagate the error to trigger a reconnect.
+                return Err(PublisherError::Retryable(e));
+            }
+            Err(PublisherError::NonRetryable(_)) => {
+                // A non-retryable error is specific to this message.
+                // Collect it and continue with the rest of the batch.
                 failed_messages.push(msg);
             }
         }
     }
 
-    let responses = if responses.is_empty() {
-        None
+    if failed_messages.is_empty() && responses.is_empty() {
+        Ok(SendBatchOutcome::Ack)
     } else {
-        Some(responses)
-    };
-
-    Ok((responses, failed_messages))
+        Ok(SendBatchOutcome::Partial {
+            responses: if responses.is_empty() {
+                None
+            } else {
+                Some(responses)
+            },
+            failed: failed_messages,
+        })
+    }
 }
 
 /// Converts a `BatchCommitFunc` into a `CommitFunc` by wrapping it.

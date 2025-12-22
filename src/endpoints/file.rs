@@ -2,10 +2,12 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
-use crate::traits::{into_batch_commit_func, BatchCommitFunc};
-use crate::traits::{BoxFuture, MessageConsumer, MessagePublisher};
+use crate::traits::{
+    into_batch_commit_func, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher,
+    PublisherError, ReceivedBatch, SendBatchOutcome,
+};
 use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use async_trait::async_trait;
 use std::any::Any;
 use std::path::Path;
@@ -51,9 +53,9 @@ impl MessagePublisher for FilePublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SendBatchOutcome, PublisherError> {
         if messages.is_empty() {
-            return Ok((None, Vec::new()));
+            return Ok(SendBatchOutcome::Ack);
         }
 
         let mut writer = self.writer.lock().await;
@@ -69,7 +71,9 @@ impl MessagePublisher for FilePublisher {
                     continue;
                 }
             };
-            if writer.write_all(&serialized_msg).await.is_err() || writer.write_all(b"\n").await.is_err() {
+            if writer.write_all(&serialized_msg).await.is_err()
+                || writer.write_all(b"\n").await.is_err()
+            {
                 // If write fails, add the message to the failed list
                 failed_messages.push(msg);
             } else {
@@ -77,8 +81,18 @@ impl MessagePublisher for FilePublisher {
             }
         }
 
-        writer.flush().await?;
-        Ok((None, failed_messages))
+        writer
+            .flush()
+            .await
+            .context("Failed to flush file writer")?;
+        if failed_messages.is_empty() {
+            Ok(SendBatchOutcome::Ack)
+        } else {
+            Ok(SendBatchOutcome::Partial {
+                responses: None,
+                failed: failed_messages,
+            })
+        }
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
@@ -120,23 +134,33 @@ impl MessageConsumer for FileConsumer {
     async fn receive_batch(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    ) -> Result<ReceivedBatch, ConsumerError> {
         let mut buffer = Vec::new();
 
-        let bytes_read = self.reader.read_until(b'\n', &mut buffer).await?;
+        let bytes_read = self
+            .reader
+            .read_until(b'\n', &mut buffer)
+            .await
+            .context("Failed to read from file source")?;
         if bytes_read == 0 {
             debug!("End of file reached, consumer will stop.");
-            return Err(anyhow!("End of file reached: {}", self.path));
+            return Err(ConsumerError::EndOfStream);
         }
 
         let message: CanonicalMessage = serde_json::from_slice(&buffer).with_context(|| {
-            format!("Failed to deserialize message from file: {}", String::from_utf8_lossy(&buffer))
+            format!(
+                "Failed to deserialize message from file: {}",
+                String::from_utf8_lossy(&buffer)
+            )
         })?;
 
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);
 
-        Ok((vec![message], into_batch_commit_func(commit)))
+        Ok(ReceivedBatch {
+            messages: vec![message],
+            commit: into_batch_commit_func(commit),
+        })
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -146,6 +170,7 @@ impl MessageConsumer for FileConsumer {
 
 #[cfg(test)]
 mod tests {
+    use crate::traits::ConsumerError;
     use crate::traits::MessageConsumer;
     use crate::traits::MessagePublisher;
     use crate::{
@@ -182,11 +207,12 @@ mod tests {
         // 5. Receive the messages and verify them
         let (received_msg1, commit1) = source.receive().await.unwrap();
         commit1(None).await; // Commit is a no-op, but we should call it
-        
+
         assert_eq!(received_msg1.message_id, msg1.message_id);
         assert_eq!(received_msg1.payload, msg1.payload);
 
-        let (received_msgs, commit2) = source.receive_batch(1).await.unwrap();
+        let batch = source.receive_batch(1).await.unwrap();
+        let (received_msgs, commit2) = (batch.messages, batch.commit);
         let received_msg2 = received_msgs.into_iter().next().unwrap();
         commit2(None).await;
         assert_eq!(received_msg2.message_id, msg2.message_id);
@@ -195,8 +221,9 @@ mod tests {
         // 6. Verify that reading again results in EOF
         let eof_result = source.receive_batch(1).await;
         match eof_result {
-            Ok(_) => panic!("Expected an error, but got Ok"),
-            Err(e) => assert!(e.to_string().contains("End of file reached")),
+            Ok(_) => panic!("Expected an eof error, but got Ok"),
+            Err(ConsumerError::EndOfStream) => (),
+            Err(e) => panic!("Expected an eof error, but got {:?}", e),
         }
     }
 

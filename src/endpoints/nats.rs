@@ -1,8 +1,11 @@
 use crate::models::NatsConfig;
-use crate::traits::{BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{
+    BatchCommitFunc, BoxFuture, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher,
+    PublisherError, ReceivedBatch, SendBatchOutcome, SendOutcome,
+};
 use crate::CanonicalMessage;
 use crate::APP_NAME;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use async_nats::{header::HeaderMap, jetstream, jetstream::stream, ConnectOptions};
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
@@ -65,7 +68,7 @@ impl NatsPublisher {
 
 #[async_trait]
 impl MessagePublisher for NatsPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
         let headers = if !message.metadata.is_empty() {
             let mut headers = HeaderMap::new();
             for (key, value) in &message.metadata {
@@ -80,26 +83,31 @@ impl MessagePublisher for NatsPublisher {
             NatsClient::JetStream(jetstream) => {
                 let ack_future = jetstream
                     .publish_with_headers(self.subject.clone(), headers, message.payload)
-                    .await?;
+                    .await
+                    .context("Failed to publish to NATS JetStream")?;
 
                 if !self.delayed_ack {
-                    ack_future.await?; // Wait for the server acknowledgment
+                    ack_future
+                        .await
+                        .context("Failed to get NATS JetStream publish acknowledgement")?;
+                    // Wait for the server acknowledgment
                 }
             }
             NatsClient::Core(client) => {
                 client
                     .publish_with_headers(self.subject.clone(), headers, message.payload)
-                    .await?;
+                    .await
+                    .context("Failed to publish to NATS Core")?;
             }
         }
 
-        Ok(None)
+        Ok(SendOutcome::Ack)
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SendBatchOutcome, PublisherError> {
         // not a real bulk, but fast enough
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
@@ -221,12 +229,13 @@ impl NatsConsumer {
 
 #[async_trait]
 impl MessageConsumer for NatsConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
         let (message, commit) = match &mut self.subscription {
             NatsSubscription::JetStream(stream) => {
                 let message = futures::StreamExt::next(stream)
                     .await
-                    .ok_or_else(|| anyhow!("NATS JetStream subscription ended"))??;
+                    .ok_or(ConsumerError::EndOfStream)?
+                    .context("Failed to get message from NATS JetStream")?;
                 let sequence = message.info().ok().map(|meta| meta.stream_sequence);
                 let msg = Self::create_canonical_message(&message, sequence);
                 let commit: CommitFunc = Box::new(move |_response| {
@@ -253,12 +262,12 @@ impl MessageConsumer for NatsConsumer {
         Ok((message, commit))
     }
 
-    async fn receive_batch(
-        &mut self,
-        max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         if max_messages == 0 {
-            return Ok((Vec::new(), Box::new(|_| Box::pin(async {}))));
+            return Ok(ReceivedBatch {
+                messages: Vec::new(),
+                commit: Box::new(|_| Box::pin(async {})),
+            });
         }
 
         match &mut self.subscription {
@@ -305,7 +314,14 @@ impl MessageConsumer for NatsConsumer {
                     }) as BoxFuture<'static, ()>
                 });
 
-                Ok((canonical_messages, commit_closure))
+                if canonical_messages.is_empty() {
+                    Err(ConsumerError::EndOfStream)
+                } else {
+                    Ok(ReceivedBatch {
+                        messages: canonical_messages,
+                        commit: commit_closure,
+                    })
+                }
             }
             NatsSubscription::Core(sub) => {
                 let mut messages = Vec::new();
@@ -316,7 +332,14 @@ impl MessageConsumer for NatsConsumer {
                 if let Some(message) = sub.next().await {
                     messages.push(Self::create_canonical_message(&message, None));
                 }
-                Ok((messages, commit_closure))
+                if messages.is_empty() {
+                    Err(ConsumerError::EndOfStream)
+                } else {
+                    Ok(ReceivedBatch {
+                        messages,
+                        commit: commit_closure,
+                    })
+                }
             }
         }
     }

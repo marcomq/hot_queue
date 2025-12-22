@@ -1,5 +1,8 @@
 use crate::models::KafkaConfig;
-use crate::traits::{BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{
+    BoxFuture, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
+    ReceivedBatch, SendBatchOutcome, SendOutcome,
+};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -127,7 +130,7 @@ impl Drop for KafkaPublisher {
 
 #[async_trait]
 impl MessagePublisher for KafkaPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
         let mut record = FutureRecord::to(&self.topic).payload(&message.payload[..]);
 
         if !message.metadata.is_empty() {
@@ -156,17 +159,17 @@ impl MessagePublisher for KafkaPublisher {
             // `linger.ms` and other batching settings. We don't await the delivery report
             // here to achieve high throughput. The `flush()` in `Drop` ensures all messages
             // are sent before shutdown.
-            if let Err((e, _)) = self.producer.send_result(record) {
-                return Err(anyhow!("Failed to enqueue Kafka message: {}", e));
-            }
+            self.producer
+                .send_result(record)
+                .map_err(|(e, _)| anyhow!("Failed to enqueue Kafka message: {}", e))?;
         }
-        Ok(None)
+        Ok(SendOutcome::Ack)
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SendBatchOutcome, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })
@@ -258,8 +261,12 @@ impl Drop for KafkaConsumer {
 
 #[async_trait]
 impl MessageConsumer for KafkaConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        let message = self.consumer.recv().await?;
+    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
+        let message = self
+            .consumer
+            .recv()
+            .await
+            .context("Failed to receive Kafka message")?;
         let mut tpl = TopicPartitionList::new();
         let mut messages = Vec::new();
         process_message(message, &mut messages, &mut tpl)?;
@@ -279,10 +286,7 @@ impl MessageConsumer for KafkaConsumer {
         Ok((canonical_message, commit))
     }
 
-    async fn receive_batch(
-        &mut self,
-        max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         let mut messages = Vec::with_capacity(max_messages);
         let mut last_offset_tpl = TopicPartitionList::new();
         {
@@ -295,8 +299,10 @@ impl MessageConsumer for KafkaConsumer {
                     Ok(message) => {
                         process_message(message, &mut messages, &mut last_offset_tpl)?;
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(anyhow!(e).into()),
                 }
+            } else {
+                return Err(ConsumerError::EndOfStream);
             }
 
             // If we got one message, greedily consume any others that are already buffered.
@@ -328,7 +334,7 @@ impl MessageConsumer for KafkaConsumer {
                 }
             }) as BoxFuture<'static, ()>
         });
-        Ok((messages, commit))
+        Ok(ReceivedBatch { messages, commit })
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -348,7 +354,8 @@ fn process_message(
     // Combine partition and offset for a unique ID within a topic.
     // A u128 is used to hold both values, with the partition in the high 64 bits
     // and the offset in the low 64 bits.
-    let message_id = ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128);
+    let message_id =
+        ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128);
     let mut canonical_message = CanonicalMessage::new(payload.to_vec(), Some(message_id));
     if let Some(headers) = message.headers() {
         if headers.count() > 0 {

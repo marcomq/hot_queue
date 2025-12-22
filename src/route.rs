@@ -5,7 +5,7 @@ use std::sync::Arc;
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
-use crate::traits::BatchCommitFunc;
+use crate::traits::{BatchCommitFunc, ConsumerError, SendBatchOutcome};
 use async_channel::{bounded, Sender};
 use tokio::{
     select,
@@ -107,24 +107,40 @@ impl Route {
                 }
                 res = consumer.receive_batch(BATCH_SIZE) => {
                     let (messages, commit) = match res {
-                        Ok(val) => val,
-                        Err(e) => {
-                            info!("Consumer returned an error, likely end-of-stream: {}. Shutting down route.", e);
-                            break; // Graceful exit on end-of-stream
+                        Ok(batch) => {
+                            if batch.messages.is_empty() {
+                                continue; // No messages, loop to select! again
+                            }
+                            (batch.messages, batch.commit)
+                        }
+                        Err(ConsumerError::EndOfStream) => {
+                            info!("Consumer for route '{}' reached end of stream. Shutting down.", name);
+                            break; // Graceful exit
+                        }
+                        Err(ConsumerError::Connection(e)) => {
+                            // Propagate error to trigger reconnect by the outer loop
+                            return Err(e.into());
                         }
                     };
                     debug!("Received a batch of {} messages sequentially", messages.len());
 
                     // Process the batch sequentially without spawning a new task
                     match publisher.send_batch(messages).await {
-                        Ok((response, failed)) if failed.is_empty() => {
-                            commit(response).await;
+                        Ok(SendBatchOutcome::Ack) => {
+                            commit(None).await;
                         }
-                        Ok((response, failed)) => {
-                            commit(response).await; // Commit the successful messages
-                            return Err(anyhow::anyhow!("Failed to send {} messages", failed.len()));
+                        Ok(SendBatchOutcome::Partial { responses, failed }) => {
+                            let failed_count = failed.len();
+                            commit(responses).await; // Commit the successful messages
+                            if failed_count > 0 {
+                                // Replicate old behavior: any failure in a batch is a route-level error.
+                                return Err(anyhow::anyhow!(
+                                    "Failed to send {} messages in batch (non-retryable).",
+                                    failed_count
+                                ));
+                            }
                         }
-                        Err(e) => return Err(e), // Propagate error to trigger reconnect
+                        Err(e) => return Err(e.into()), // Propagate error to trigger reconnect
                     }
                 }
             }
@@ -158,23 +174,27 @@ impl Route {
                 while let Ok((messages, commit)) = work_rx_clone.recv().await {
                     // The worker now receives a batch and sends it as a bulk.
                     match publisher.send_batch(messages).await {
-                        // Note: removed '?' to handle all cases
-                        Ok((response, failed)) if failed.is_empty() => {
-                            commit(response).await;
+                        Ok(SendBatchOutcome::Ack) => {
+                            commit(None).await;
                         }
-                        Ok((response, failed)) => {
-                            commit(response).await; // Commit the successful messages
-                            let e = anyhow::anyhow!("Failed to send {} messages", failed.len());
-                            error!("Worker failed to send message batch: {}", e);
-                            // Send the error back to the main task to tear down the route.
-                            if err_tx.send(e).await.is_err() {
-                                warn!("Could not send error to main task, it might be down.");
+                        Ok(SendBatchOutcome::Partial { responses, failed }) => {
+                            let failed_count = failed.len();
+                            commit(responses).await; // Commit the successful messages
+                            if failed_count > 0 {
+                                let e = anyhow::anyhow!(
+                                    "Failed to send {} messages in batch (non-retryable).",
+                                    failed_count
+                                );
+                                error!("Worker failed to send message batch: {}", e);
+                                if err_tx.send(e).await.is_err() {
+                                    warn!("Could not send error to main task, it might be down.");
+                                }
                             }
                         }
                         Err(e) => {
                             error!("Worker failed to send message batch: {}", e);
                             // Send the error back to the main task to tear down the route.
-                            if err_tx.send(e).await.is_err() {
+                            if err_tx.send(e.into()).await.is_err() {
                                 warn!("Could not send error to main task, it might be down.");
                             }
                         }
@@ -199,10 +219,19 @@ impl Route {
 
                 res = consumer.receive_batch(BATCH_SIZE) => {
                     let (messages, commit) = match res {
-                        Ok(val) => val,
-                        Err(e) => {
-                            warn!("Consumer returned an error, likely end-of-stream: {}. Shutting down route.", e);
-                            break; // Exit the select loop gracefully
+                        Ok(batch) => {
+                            if batch.messages.is_empty() {
+                                continue; // No messages, loop to select! again
+                            }
+                            (batch.messages, batch.commit)
+                        }
+                        Err(ConsumerError::EndOfStream) => {
+                            info!("Consumer for route '{}' reached end of stream. Shutting down.", name);
+                            break; // Graceful exit
+                        }
+                        Err(ConsumerError::Connection(e)) => {
+                            // Propagate error to trigger reconnect by the outer loop
+                            return Err(e.into());
                         }
                     };
                     debug!("Received a batch of {} messages concurrently", messages.len());

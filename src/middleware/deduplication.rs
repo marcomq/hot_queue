@@ -3,8 +3,11 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::models::DeduplicationMiddleware;
-use crate::traits::{into_batch_commit_func, BatchCommitFunc, CommitFunc, MessageConsumer};
+use crate::traits::{
+    into_batch_commit_func, CommitFunc, ConsumerError, MessageConsumer, ReceivedBatch,
+};
 use crate::CanonicalMessage;
+use anyhow::Context;
 use async_trait::async_trait;
 use sled::Db;
 use std::any::Any;
@@ -40,18 +43,21 @@ impl DeduplicationConsumer {
 #[async_trait]
 impl MessageConsumer for DeduplicationConsumer {
     #[instrument(skip_all)]
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
         loop {
             let (message, commit) = self.inner.receive().await?;
             let key = message.message_id.to_be_bytes().to_vec();
 
-            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("System time is before UNIX EPOCH")?
+                .as_secs();
             // Atomically insert only if key doesn't exist
-            match self.db.compare_and_swap(
-                &key,
-                None as Option<&[u8]>,
-                Some(&now.to_be_bytes()[..]),
-            )? {
+            match self
+                .db
+                .compare_and_swap(&key, None as Option<&[u8]>, Some(&now.to_be_bytes()[..]))
+                .context("Failed to perform compare-and-swap in deduplication DB")?
+            {
                 Ok(_) => {
                     // Successfully inserted - not a duplicate, proceed
                 }
@@ -121,10 +127,13 @@ impl MessageConsumer for DeduplicationConsumer {
     async fn receive_batch(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    ) -> Result<ReceivedBatch, ConsumerError> {
         let (msg, commit) = self.receive().await?;
         let commit = into_batch_commit_func(commit);
-        Ok((vec![msg], commit))
+        Ok(ReceivedBatch {
+            messages: vec![msg],
+            commit,
+        })
     }
 
     fn as_any(&self) -> &dyn Any {

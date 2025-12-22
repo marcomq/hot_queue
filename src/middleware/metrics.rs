@@ -3,8 +3,10 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::models::MetricsMiddleware;
-use crate::traits::MessagePublisher;
-use crate::traits::{BatchCommitFunc, CommitFunc, MessageConsumer};
+use crate::traits::{
+    CommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
+    SendBatchOutcome, SendOutcome,
+};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -33,29 +35,27 @@ impl MetricsPublisher {
 
 #[async_trait]
 impl MessagePublisher for MetricsPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
         let start = Instant::now();
-        let result = self.inner.send(message).await;
+        let result = self.inner.send(message).await?;
         let duration = start.elapsed();
 
-        if result.is_ok() {
-            metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(1);
-            metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(duration.as_secs_f64());
-        }
+        metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(1);
+        metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(duration.as_secs_f64());
 
-        result
+        Ok(result)
     }
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SendBatchOutcome, PublisherError> {
         let total_count = messages.len();
         let start = Instant::now();
-        let result = self.inner.send_batch(messages).await;
+        let result = self.inner.send_batch(messages).await?;
         let duration = start.elapsed();
 
         match &result {
-            Ok((_, failed)) => {
+            SendBatchOutcome::Partial { failed, .. } => {
                 let successful_count = total_count - failed.len();
                 if successful_count > 0 {
                     let avg_duration = duration.as_secs_f64() / successful_count as f64;
@@ -64,12 +64,13 @@ impl MessagePublisher for MetricsPublisher {
                 }
                 // We can add a new metric for failures here if desired
             }
-            Err(_) => {
-                // On a total failure, we could increment an error counter for the whole batch
-                // For now, we just don't record success, which is implicitly correct.
+            SendBatchOutcome::Ack => {
+                let avg_duration = duration.as_secs_f64() / total_count as f64;
+                metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(total_count as u64);
+                metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(avg_duration);
             }
         }
-        result
+        Ok(result)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -100,36 +101,29 @@ impl MetricsConsumer {
 
 #[async_trait]
 impl MessageConsumer for MetricsConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+    async fn receive(&mut self) -> Result<(CanonicalMessage, CommitFunc), ConsumerError> {
         let start = Instant::now();
-        let result = self.inner.receive().await;
+        let result = self.inner.receive().await?;
         let duration = start.elapsed();
 
-        if result.is_ok() {
-            metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(1);
-            metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(duration.as_secs_f64());
-        }
+        metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(1);
+        metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(duration.as_secs_f64());
 
-        result
+        Ok(result)
     }
 
-    async fn receive_batch(
-        &mut self,
-        max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         let start = Instant::now();
-        let result = self.inner.receive_batch(max_messages).await;
+        let batch = self.inner.receive_batch(max_messages).await?;
         let duration = start.elapsed();
 
-        if let Ok((messages, _)) = &result {
-            if !messages.is_empty() {
-                let avg_duration = duration.as_secs_f64() / messages.len() as f64;
-                metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(messages.len() as u64);
-                metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(avg_duration);
-            }
+        if !batch.messages.is_empty() {
+            let avg_duration = duration.as_secs_f64() / batch.messages.len() as f64;
+            metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(batch.messages.len() as u64);
+            metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(avg_duration);
         }
 
-        result
+        Ok(batch)
     }
 
     fn as_any(&self) -> &dyn Any {

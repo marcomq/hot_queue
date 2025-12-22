@@ -3,7 +3,10 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::models::MemoryConfig;
-use crate::traits::{BatchCommitFunc, BoxFuture, MessageConsumer, MessagePublisher};
+use crate::traits::{
+    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
+    SendBatchOutcome,
+};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_channel::{bounded, Receiver, Sender};
@@ -122,7 +125,7 @@ impl MessagePublisher for MemoryPublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SendBatchOutcome, PublisherError> {
         self.sender
             .send(messages)
             .await
@@ -134,7 +137,7 @@ impl MessagePublisher for MemoryPublisher {
         );
         // Memory channel sends are atomic; if it succeeds, all messages were sent.
         // Return no responses and an empty vec of failed messages.
-        Ok((None, Vec::new()))
+        Ok(SendBatchOutcome::Ack)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -169,10 +172,7 @@ impl MemoryConsumer {
 
 #[async_trait]
 impl MessageConsumer for MemoryConsumer {
-    async fn receive_batch(
-        &mut self,
-        max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         // If the internal buffer has messages, return them first.
         if self.buffer.is_empty() {
             // Buffer is empty. Wait for a new batch from the channel.
@@ -194,8 +194,15 @@ impl MessageConsumer for MemoryConsumer {
         let mut messages = self.buffer.split_off(split_at);
         messages.reverse(); // Reverse back to original order.
 
+        if messages.is_empty() {
+            return Ok(ReceivedBatch {
+                messages: Vec::new(),
+                commit: Box::new(|_| Box::pin(async {})),
+            });
+        }
+
         let commit = Box::new(|_| Box::pin(async move {}) as BoxFuture<'static, ()>);
-        Ok((messages, commit))
+        Ok(ReceivedBatch { messages, commit })
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -261,11 +268,13 @@ mod tests {
         commit1(None).await;
         assert_eq!(received_msg1.payload, msg1.payload);
 
-        let (received_msg2, commit2) = consumer.receive_batch(1).await.unwrap();
+        let batch2 = consumer.receive_batch(1).await.unwrap();
+        let (received_msg2, commit2) = (batch2.messages, batch2.commit);
         commit2(None).await;
         assert_eq!(received_msg2.len(), 1);
         assert_eq!(received_msg2.get(0).unwrap().payload, msg2.payload);
-        let (received_msg3, commit3) = consumer.receive_batch(2).await.unwrap();
+        let batch3 = consumer.receive_batch(2).await.unwrap();
+        let (received_msg3, commit3) = (batch3.messages, batch3.commit);
         commit3(None).await;
         assert_eq!(received_msg3.get(0).unwrap().payload, msg3.payload);
 

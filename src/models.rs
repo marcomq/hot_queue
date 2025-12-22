@@ -584,7 +584,10 @@ kafka_to_nats:
         unsafe {
             std::env::set_var("MQB__KAFKA_TO_NATS__CONCURRENCY", "10");
             std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
-            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS", "localhost:9092");
+            std::env::set_var(
+                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS",
+                "localhost:9092",
+            );
             std::env::set_var(
                 "MQB__KAFKA_TO_NATS__INPUT__KAFKA__GROUP_ID",
                 "my-consumer-group",
@@ -598,7 +601,10 @@ kafka_to_nats:
                 "MQB__KAFKA_TO_NATS__INPUT__KAFKA__TLS__ACCEPT_INVALID_CERTS",
                 "true",
             );
-            std::env::set_var("MQB__KAFKA_TO_NATS__OUTPUT__NATS__SUBJECT", "output-subject");
+            std::env::set_var(
+                "MQB__KAFKA_TO_NATS__OUTPUT__NATS__SUBJECT",
+                "output-subject",
+            );
             std::env::set_var(
                 "MQB__KAFKA_TO_NATS__OUTPUT__NATS__URL",
                 "nats://localhost:4222",
