@@ -10,6 +10,7 @@ use async_trait::async_trait;
 pub use futures::future::BoxFuture;
 use std::any::Any;
 use std::sync::Arc;
+use tracing::warn;
 
 /// A trait for handling commands.
 ///
@@ -61,6 +62,12 @@ pub trait MessageConsumer: Send + Sync {
             let mut batch = self.receive_batch(1).await?;
             if let Some(msg) = batch.messages.pop() {
                 debug_assert!(batch.messages.is_empty());
+                if !batch.messages.is_empty() {
+                    warn!(
+                        "receive_batch(1) returned {} extra messages; dropping them (implementation bug)",
+                        batch.messages.len()
+                    );
+                }
                 return Ok(Received {
                     message: msg,
                     commit: into_commit_func(batch.commit),
@@ -135,6 +142,10 @@ impl<T: MessagePublisher + ?Sized> MessagePublisher for Arc<T> {
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
         (**self).send_batch(messages).await
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        (**self).flush().await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -224,10 +235,17 @@ pub fn into_commit_func(batch_commit: BatchCommitFunc) -> CommitFunc {
 /// it to the underlying single-message commit function.
 pub fn into_batch_commit_func(commit: CommitFunc) -> BatchCommitFunc {
     Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
-        if let Some(resp_vec) = &responses {
-            debug_assert!(resp_vec.len() == 1);
+        let single_response = match responses {
+            Some(resp_vec) if resp_vec.len() > 1 => {
+                warn!(
+                    "into_batch_commit_func called with batch of {} messages; dropping all responses to avoid partial commit (incorrect usage)",
+                    resp_vec.len()
+                );
+                None
+            }
+            Some(mut resp_vec) => resp_vec.pop(),
+            None => None,
         };
-        let single_response = responses.and_then(|resp_vec| resp_vec.into_iter().next());
         commit(single_response)
     })
 }

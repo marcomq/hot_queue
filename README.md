@@ -30,7 +30,7 @@ For implementing business logic, `mq-bridge` provides a handler layer that is se
 You can chain these handlers with endpoint publishers.
 
 ```rust
-use mq_bridge::traits::{CommandHandler, CommandHandlerPublisher};
+use mq_bridge::traits::CommandHandler;
 use std::sync::Arc;
 
 // Define a handler that transforms the message payload
