@@ -113,7 +113,13 @@ async fn create_publisher_with_depth(
             MAX_DEPTH
         ));
     }
-    let publisher = create_base_publisher(route_name, &endpoint.endpoint_type, depth).await?;
+    let mut publisher = create_base_publisher(route_name, &endpoint.endpoint_type, depth).await?;
+    if let Some(handler) = &endpoint.handler {
+        publisher = Box::new(crate::command_handler::CommandHandlerPublisher::new(
+            publisher,
+            handler.clone(),
+        ));
+    }
     crate::middleware::apply_middlewares_to_publisher(publisher, endpoint, route_name).await
 }
 

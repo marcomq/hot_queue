@@ -1,7 +1,7 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
 use chrono;
-use mq_bridge::traits::{ConsumerError, MessageConsumer, ReceivedBatch, SendBatchOutcome};
+use mq_bridge::traits::{ConsumerError, MessageConsumer, ReceivedBatch, SentBatch};
 use mq_bridge::traits::{MessagePublisher, Received};
 use mq_bridge::{CanonicalMessage, Route};
 use once_cell::sync::Lazy;
@@ -438,12 +438,12 @@ pub async fn measure_write_performance(
                         .send_batch(std::mem::take(&mut messages_to_send))
                         .await
                     {
-                        Ok(SendBatchOutcome::Ack) => {
+                        Ok(SentBatch::Ack) => {
                             final_count_clone
                                 .fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
                             break; // All sent successfully
                         }
-                        Ok(SendBatchOutcome::Partial {
+                        Ok(SentBatch::Partial {
                             responses: _,
                             failed,
                         }) => {

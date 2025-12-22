@@ -6,7 +6,7 @@ use crate::endpoints::create_publisher_from_route;
 use crate::models::HttpConfig;
 use crate::traits::{
     BoxFuture, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
-    ReceivedBatch, SendBatchOutcome, SendOutcome,
+    ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -195,10 +195,8 @@ async fn handle_request(
                 // If a response sink is configured, use it to generate the response.
                 if let Some(sink) = &state.response_sink {
                     match sink.send(message_for_sink.unwrap()).await {
-                        Ok(SendOutcome::Response(sink_response)) => {
-                            make_response(Some(sink_response))
-                        }
-                        Ok(SendOutcome::Ack) => make_response(None),
+                        Ok(Sent::Response(sink_response)) => make_response(Some(sink_response)),
+                        Ok(Sent::Ack) => make_response(None),
                         Err(e) => (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             format!("Response sink error: {}", e),
@@ -283,7 +281,7 @@ impl HttpPublisher {
 
 #[async_trait]
 impl MessagePublisher for HttpPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let mut request_builder = self.client.post(&self.url);
         for (key, value) in &message.metadata {
             request_builder = request_builder.header(key, value);
@@ -326,12 +324,12 @@ impl MessagePublisher for HttpPublisher {
                 response_message.metadata = response_metadata;
             }
             sink.send(response_message).await?;
-            Ok(SendOutcome::Ack)
+            Ok(Sent::Ack)
         } else {
             let mut response_message =
                 CanonicalMessage::new(response_bytes, Some(message.message_id));
             response_message.metadata = response_metadata;
-            Ok(SendOutcome::Response(response_message))
+            Ok(Sent::Response(response_message))
         }
     }
 
@@ -339,7 +337,7 @@ impl MessagePublisher for HttpPublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })
@@ -449,7 +447,7 @@ http_route:
         let received_msg = receive_task.await.expect("Receive task failed");
         assert_eq!(received_msg.payload, msg_payload);
         let response = match response {
-            SendOutcome::Response(msg) => msg,
+            Sent::Response(msg) => msg,
             _ => panic!("Expected response"),
         };
         assert_eq!(response.payload, b"response_payload".to_vec());
@@ -561,8 +559,8 @@ http_route:
                 let static_response_outcome =
                     static_publisher.send(received.message).await.unwrap();
                 let pipeline_response = match static_response_outcome {
-                    SendOutcome::Response(msg) => Some(msg),
-                    SendOutcome::Ack => None,
+                    Sent::Response(msg) => Some(msg),
+                    Sent::Ack => None,
                 };
                 (received.commit)(pipeline_response).await;
             }

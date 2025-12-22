@@ -4,7 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::traits::{
     into_batch_commit_func, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher,
-    PublisherError, ReceivedBatch, SendBatchOutcome,
+    PublisherError, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::Context;
@@ -53,9 +53,9 @@ impl MessagePublisher for FilePublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         if messages.is_empty() {
-            return Ok(SendBatchOutcome::Ack);
+            return Ok(SentBatch::Ack);
         }
 
         let mut writer = self.writer.lock().await;
@@ -88,9 +88,9 @@ impl MessagePublisher for FilePublisher {
             .await
             .context("Failed to flush file writer")?;
         if failed_messages.is_empty() {
-            Ok(SendBatchOutcome::Ack)
+            Ok(SentBatch::Ack)
         } else {
-            Ok(SendBatchOutcome::Partial {
+            Ok(SentBatch::Partial {
                 responses: None,
                 failed: failed_messages,
             })

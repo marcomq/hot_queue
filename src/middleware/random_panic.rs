@@ -1,7 +1,7 @@
 use crate::models::RandomPanicMiddleware;
 use crate::traits::{
     ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received, ReceivedBatch,
-    SendBatchOutcome, SendOutcome,
+    Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use async_trait::async_trait;
@@ -79,7 +79,7 @@ impl RandomPanicPublisher {
 
 #[async_trait]
 impl MessagePublisher for RandomPanicPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         self.maybe_panic();
         self.inner.send(message).await
     }
@@ -87,7 +87,7 @@ impl MessagePublisher for RandomPanicPublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         self.maybe_panic();
         self.inner.send_batch(messages).await
     }

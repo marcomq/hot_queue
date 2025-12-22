@@ -5,7 +5,7 @@
 use crate::models::MemoryConfig;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
-    SendBatchOutcome,
+    SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::anyhow;
@@ -110,6 +110,14 @@ impl MemoryPublisher {
         })
     }
 
+    pub fn new_local(topic: &str, capacity: usize) -> Self {
+        Self::new(&MemoryConfig {
+            topic: topic.to_string(),
+            capacity: Some(capacity),
+        })
+        .expect("Failed to create local memory publisher")
+    }
+
     /// Note: This helper is primarily for tests expecting a Queue.    
     /// If used on a broadcast publisher, it will create a separate Queue channel.
     pub fn channel(&self) -> MemoryChannel {
@@ -125,7 +133,7 @@ impl MessagePublisher for MemoryPublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         self.sender
             .send(messages)
             .await
@@ -137,7 +145,7 @@ impl MessagePublisher for MemoryPublisher {
         );
         // Memory channel sends are atomic; if it succeeds, all messages were sent.
         // Return no responses and an empty vec of failed messages.
-        Ok(SendBatchOutcome::Ack)
+        Ok(SentBatch::Ack)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -162,6 +170,15 @@ impl MemoryConsumer {
             buffer: Vec::new(),
         })
     }
+
+    pub fn new_local(topic: &str, capacity: usize) -> Self {
+        Self::new(&MemoryConfig {
+            topic: topic.to_string(),
+            capacity: Some(capacity),
+        })
+        .expect("Failed to create local memory consumer")
+    }
+
     pub fn channel(&self) -> MemoryChannel {
         get_or_create_channel(&MemoryConfig {
             topic: self.topic.clone(),

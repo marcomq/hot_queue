@@ -4,7 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::traits::{
     into_batch_commit_func, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher,
-    PublisherError, Received, ReceivedBatch, SendBatchOutcome, SendOutcome,
+    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::Context;
@@ -29,17 +29,17 @@ impl StaticEndpointPublisher {
 
 #[async_trait]
 impl MessagePublisher for StaticEndpointPublisher {
-    async fn send(&self, _message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, _message: CanonicalMessage) -> Result<Sent, PublisherError> {
         trace!(response = %self.content, "Sending static response");
         let payload = serde_json::to_vec(&Value::String(self.content.clone()))
             .context("Failed to serialize static response to JSON")?;
-        Ok(SendOutcome::Response(CanonicalMessage::new(payload, None)))
+        Ok(Sent::Response(CanonicalMessage::new(payload, None)))
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })
@@ -110,7 +110,7 @@ mod tests {
 
         let response = publisher.send(msg).await.unwrap();
         let response_msg = match response {
-            SendOutcome::Response(msg) => msg,
+            Sent::Response(msg) => msg,
             _ => panic!("Expected response"),
         };
         let expected_payload = serde_json::to_vec(&Value::String(content.to_string())).unwrap();

@@ -1,7 +1,7 @@
 use crate::models::MongoDbConfig;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
-    Received, ReceivedBatch, SendBatchOutcome, SendOutcome,
+    Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -69,7 +69,7 @@ impl MongoDbPublisher {
 
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
         let metadata = to_document(&message.metadata)
             .context("Failed to serialize metadata to BSON document")?;
@@ -89,13 +89,13 @@ impl MessagePublisher for MongoDbPublisher {
             .await
             .context("Failed to insert document into MongoDB")?;
 
-        Ok(SendOutcome::Ack)
+        Ok(Sent::Ack)
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })

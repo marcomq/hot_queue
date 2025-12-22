@@ -5,7 +5,7 @@
 
 use crate::endpoints::create_publisher_from_route;
 use crate::models::DeadLetterQueueMiddleware;
-use crate::traits::{MessagePublisher, PublisherError, SendBatchOutcome, SendOutcome};
+use crate::traits::{MessagePublisher, PublisherError, Sent, SentBatch};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -91,7 +91,7 @@ impl DlqPublisher {
 
 #[async_trait]
 impl MessagePublisher for DlqPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         match self.inner.send(message.clone()).await {
             Ok(response) => Ok(response),
             Err(e) => {
@@ -103,7 +103,7 @@ impl MessagePublisher for DlqPublisher {
                     Ok(()) => {
                         // Message successfully sent to DLQ. We return Ok(None) to signal that
                         // the message was "handled" (by the DLQ) and should be committed upstream.
-                        Ok(SendOutcome::Ack)
+                        Ok(Sent::Ack)
                     }
                     Err(dlq_combined_error) => {
                         // DLQ send failed; propagate the combined error that includes both contexts
@@ -117,13 +117,13 @@ impl MessagePublisher for DlqPublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         match self.inner.send_batch(messages.clone()).await {
-            Ok(SendBatchOutcome::Ack) => Ok(SendBatchOutcome::Ack),
-            Ok(SendBatchOutcome::Partial { responses, failed }) if failed.is_empty() => {
-                Ok(SendBatchOutcome::Partial { responses, failed })
+            Ok(SentBatch::Ack) => Ok(SentBatch::Ack),
+            Ok(SentBatch::Partial { responses, failed }) if failed.is_empty() => {
+                Ok(SentBatch::Partial { responses, failed })
             }
-            Ok(SendBatchOutcome::Partial { responses, failed }) => {
+            Ok(SentBatch::Partial { responses, failed }) => {
                 let error_msg = format!("{} messages failed to send", failed.len());
                 error!(
                     "Failed to send a batch of {} messages. Attempting to send to DLQ.",
@@ -144,8 +144,8 @@ impl MessagePublisher for DlqPublisher {
                     {
                         Ok(outcome) => {
                             let dlq_failed = match outcome {
-                                SendBatchOutcome::Ack => Vec::new(),
-                                SendBatchOutcome::Partial { failed, .. } => failed,
+                                SentBatch::Ack => Vec::new(),
+                                SentBatch::Partial { failed, .. } => failed,
                             };
 
                             if dlq_failed.is_empty() {
@@ -154,7 +154,7 @@ impl MessagePublisher for DlqPublisher {
                                     failed.len(),
                                     attempt
                                 );
-                                return Ok(SendBatchOutcome::Partial {
+                                return Ok(SentBatch::Partial {
                                     responses,
                                     failed: Vec::new(),
                                 });
@@ -207,11 +207,11 @@ impl MessagePublisher for DlqPublisher {
                         .send_batch(messages_to_retry.clone())
                         .await
                     {
-                        Ok(SendBatchOutcome::Ack) => {
+                        Ok(SentBatch::Ack) => {
                             debug!("Batch of {} messages successfully sent to DLQ on attempt {} after complete primary failure.", messages.len(), attempt);
-                            return Ok(SendBatchOutcome::Ack);
+                            return Ok(SentBatch::Ack);
                         }
-                        Ok(SendBatchOutcome::Partial {
+                        Ok(SentBatch::Partial {
                             failed: dlq_failed, ..
                         }) if attempt < self.config.dlq_retry_attempts => {
                             warn!(
@@ -234,7 +234,7 @@ impl MessagePublisher for DlqPublisher {
                             error!("DLQ bulk send failed after {} attempts: {}. Original primary send error: {}", attempt, dlq_error, error_msg);
                             return Err(anyhow::anyhow!("Primary send failed: {}. DLQ bulk send also failed after {} retries: {}", error_msg, self.config.dlq_retry_attempts, dlq_error).into());
                         }
-                        Ok(SendBatchOutcome::Partial {
+                        Ok(SentBatch::Partial {
                             failed: dlq_failed, ..
                         }) => {
                             error!("DLQ bulk send failed after {} attempts. {} messages could not be sent to DLQ. Original primary send error: {}", attempt, dlq_failed.len(), error_msg);

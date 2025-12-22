@@ -7,9 +7,12 @@ use serde::{
     de::{MapAccess, Visitor},
     Deserialize, Deserializer, Serialize,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
-use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
+use crate::{
+    endpoints::memory::{get_or_create_channel, MemoryChannel},
+    traits::CommandHandler,
+};
 
 /// The top-level configuration is a map of named routes.
 /// The key is the route name (e.g., "kafka_to_nats").
@@ -54,7 +57,7 @@ fn default_multiplier() -> f64 {
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
-#[derive(Debug, Serialize, Clone)]
+#[derive(Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     /// (Optional) A list of middlewares to apply to the endpoint.
@@ -64,6 +67,26 @@ pub struct Endpoint {
     /// The specific endpoint implementation, determined by the configuration key (e.g., "kafka", "nats").
     #[serde(flatten)]
     pub endpoint_type: EndpointType,
+
+    #[serde(skip_serializing)]
+    pub handler: Option<Arc<dyn CommandHandler>>,
+}
+
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("middlewares", &self.middlewares)
+            .field("endpoint_type", &self.endpoint_type)
+            .field(
+                "handler",
+                &if self.handler.is_some() {
+                    "Some(<CommandHandler>)"
+                } else {
+                    "None"
+                },
+            )
+            .finish()
+    }
 }
 
 impl<'de> Deserialize<'de> for Endpoint {
@@ -112,6 +135,7 @@ impl<'de> Deserialize<'de> for Endpoint {
                 Ok(Endpoint {
                     middlewares,
                     endpoint_type,
+                    handler: None,
                 })
             }
         }
@@ -125,12 +149,24 @@ impl Endpoint {
         Self {
             middlewares: Vec::new(),
             endpoint_type,
+            handler: None,
         }
     }
-/// Returns a reference to the in-memory channel associated with this Endpoint.
-/// This function will only succeed if the Endpoint is of type EndpointType::Memory.
-/// If the Endpoint is not a memory endpoint, this function will return an error.
-/// This function is primarily used for testing purposes where a Queue is needed.
+    pub fn new_memory(topic: &str, capacity: usize) -> Self {
+        Self::new(EndpointType::Memory(MemoryConfig {
+            topic: topic.to_string(),
+            capacity: Some(capacity),
+        }))
+    }
+    pub fn add_middleware(mut self, middleware: Middleware) -> Self {
+        self.middlewares.push(middleware);
+        self
+    }
+    ///
+    /// Returns a reference to the in-memory channel associated with this Endpoint.
+    /// This function will only succeed if the Endpoint is of type EndpointType::Memory.
+    /// If the Endpoint is not a memory endpoint, this function will return an error.
+    /// This function is primarily used for testing purposes where a Queue is needed.
     pub fn channel(&self) -> anyhow::Result<MemoryChannel> {
         match &self.endpoint_type {
             EndpointType::Memory(cfg) => Ok(get_or_create_channel(cfg)),

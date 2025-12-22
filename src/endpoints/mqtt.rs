@@ -1,7 +1,7 @@
 use crate::models::MqttConfig;
 use crate::traits::{
     into_batch_commit_func, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher,
-    PublisherError, Received, ReceivedBatch, SendBatchOutcome, SendOutcome,
+    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -63,7 +63,7 @@ impl Drop for MqttPublisher {
 
 #[async_trait]
 impl MessagePublisher for MqttPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         tracing::trace!(
             payload = %String::from_utf8_lossy(&message.payload),
             "Publishing MQTT message"
@@ -72,13 +72,13 @@ impl MessagePublisher for MqttPublisher {
             .publish(&self.topic, self.qos, false, message.payload)
             .await
             .context("Failed to publish MQTT message")?;
-        Ok(SendOutcome::Ack)
+        Ok(Sent::Ack)
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })

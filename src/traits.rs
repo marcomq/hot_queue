@@ -4,11 +4,12 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 pub use crate::errors::{ConsumerError, HandlerError, PublisherError};
-pub use crate::outcomes::{HandlerOutcome, Received, ReceivedBatch, SendBatchOutcome, SendOutcome};
+pub use crate::outcomes::{Handled, Received, ReceivedBatch, Sent, SentBatch};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 pub use futures::future::BoxFuture;
 use std::any::Any;
+use std::sync::Arc;
 
 /// A trait for handling commands.
 ///
@@ -16,7 +17,14 @@ use std::any::Any;
 /// message, for example, as a reply or a resulting event to be published.
 #[async_trait]
 pub trait CommandHandler: Send + Sync {
-    async fn handle(&self, msg: CanonicalMessage) -> Result<HandlerOutcome, HandlerError>;
+    async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError>;
+}
+
+#[async_trait]
+impl<T: CommandHandler + ?Sized> CommandHandler for Arc<T> {
+    async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError> {
+        (**self).handle(msg).await
+    }
 }
 
 /// A trait for handling events.
@@ -87,12 +95,12 @@ pub trait MessagePublisher: Send + Sync + 'static {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError>;
+    ) -> Result<SentBatch, PublisherError>;
 
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         match self.send_batch(vec![message]).await {
-            Ok(SendBatchOutcome::Ack) => Ok(SendOutcome::Ack),
-            Ok(SendBatchOutcome::Partial {
+            Ok(SentBatch::Ack) => Ok(Sent::Ack),
+            Ok(SentBatch::Partial {
                 mut responses,
                 failed,
             }) => {
@@ -101,9 +109,9 @@ pub trait MessagePublisher: Send + Sync + 'static {
                         "Failed to send single message"
                     )))
                 } else if let Some(res) = responses.as_mut().and_then(|r| r.pop()) {
-                    Ok(SendOutcome::Response(res))
+                    Ok(Sent::Response(res))
                 } else {
-                    Ok(SendOutcome::Ack)
+                    Ok(Sent::Ack)
                 }
             }
             Err(e) => Err(e),
@@ -116,22 +124,62 @@ pub trait MessagePublisher: Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
 }
 
+#[async_trait]
+impl<T: MessagePublisher + ?Sized> MessagePublisher for Arc<T> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        (**self).send(message).await
+    }
+
+    async fn send_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> Result<SentBatch, PublisherError> {
+        (**self).send_batch(messages).await
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        (**self).as_any()
+    }
+}
+
+#[async_trait]
+impl<T: MessagePublisher + ?Sized> MessagePublisher for Box<T> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        (**self).send(message).await
+    }
+
+    async fn send_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> Result<SentBatch, PublisherError> {
+        (**self).send_batch(messages).await
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        (**self).flush().await
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        (**self).as_any()
+    }
+}
+
 /// A helper function to send messages in bulk by calling `send` for each one.
 /// This is useful for `MessagePublisher` implementations that don't have a native bulk sending mechanism.
 pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
     publisher: &P,
     messages: Vec<CanonicalMessage>,
-    callback: impl for<'a> Fn(&'a P, CanonicalMessage) -> BoxFuture<'a, Result<SendOutcome, PublisherError>>
+    callback: impl for<'a> Fn(&'a P, CanonicalMessage) -> BoxFuture<'a, Result<Sent, PublisherError>>
         + Send
         + Sync,
-) -> Result<SendBatchOutcome, PublisherError> {
+) -> Result<SentBatch, PublisherError> {
     let mut responses = Vec::new();
     let mut failed_messages = Vec::new();
 
     for msg in messages {
         match callback(publisher, msg.clone()).await {
-            Ok(SendOutcome::Response(resp)) => responses.push(resp),
-            Ok(SendOutcome::Ack) => {}
+            Ok(Sent::Response(resp)) => responses.push(resp),
+            Ok(Sent::Ack) => {}
             Err(PublisherError::Retryable(e)) => {
                 // A retryable error likely affects the whole connection.
                 // Abort the batch and propagate the error to trigger a reconnect.
@@ -146,9 +194,9 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
     }
 
     if failed_messages.is_empty() && responses.is_empty() {
-        Ok(SendBatchOutcome::Ack)
+        Ok(SentBatch::Ack)
     } else {
-        Ok(SendBatchOutcome::Partial {
+        Ok(SentBatch::Partial {
             responses: if responses.is_empty() {
                 None
             } else {

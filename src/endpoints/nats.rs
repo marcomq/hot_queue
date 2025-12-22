@@ -1,7 +1,7 @@
 use crate::models::NatsConfig;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher,
-    PublisherError, Received, ReceivedBatch, SendBatchOutcome, SendOutcome,
+    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -68,7 +68,7 @@ impl NatsPublisher {
 
 #[async_trait]
 impl MessagePublisher for NatsPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let headers = if !message.metadata.is_empty() {
             let mut headers = HeaderMap::new();
             for (key, value) in &message.metadata {
@@ -101,13 +101,13 @@ impl MessagePublisher for NatsPublisher {
             }
         }
 
-        Ok(SendOutcome::Ack)
+        Ok(Sent::Ack)
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         // not a real bulk, but fast enough
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))

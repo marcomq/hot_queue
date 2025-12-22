@@ -1,7 +1,7 @@
 use crate::models::AmqpConfig;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
-    SendBatchOutcome, SendOutcome,
+    Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -63,7 +63,7 @@ impl AmqpPublisher {
 
 #[async_trait]
 impl MessagePublisher for AmqpPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let mut properties = if self.no_persistence {
             BasicProperties::default()
         } else {
@@ -99,14 +99,14 @@ impl MessagePublisher for AmqpPublisher {
                 .await
                 .context("Failed to get AMQP publisher confirmation")?;
         }
-        Ok(SendOutcome::Ack)
+        Ok(Sent::Ack)
     }
 
     // This isn't a real bulk send, but the normal send is fast enough.
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })

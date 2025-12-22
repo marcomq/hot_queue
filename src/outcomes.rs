@@ -3,7 +3,7 @@ use crate::CanonicalMessage;
 
 /// The outcome of a successful command handling operation.
 #[derive(Debug)]
-pub enum HandlerOutcome {
+pub enum Handled {
     /// The command was handled successfully. No further message should be sent.
     /// This is equivalent to acknowledging the message.
     Ack,
@@ -13,7 +13,7 @@ pub enum HandlerOutcome {
 
 /// The outcome of a successful single message publishing operation.
 #[derive(Debug)]
-pub enum SendOutcome {
+pub enum Sent {
     /// Message was successfully sent, no response was generated.
     Ack,
     /// Message was successfully sent and a response was generated.
@@ -22,7 +22,7 @@ pub enum SendOutcome {
 
 /// The outcome of a successful batch message publishing operation.
 #[derive(Debug)]
-pub enum SendBatchOutcome {
+pub enum SentBatch {
     /// All messages in the batch were sent successfully. No responses were generated.
     Ack,
     /// The batch operation resulted in a mix of successes and failures.

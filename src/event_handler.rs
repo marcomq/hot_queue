@@ -11,7 +11,7 @@ use std::any::Any;
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::traits::{SendBatchOutcome, SendOutcome};
+use crate::traits::{Sent, SentBatch};
 #[async_trait]
 impl<F, Fut> EventHandler for F
 where
@@ -43,9 +43,9 @@ impl EventHandlerPublisher {
 
 #[async_trait]
 impl MessagePublisher for EventHandlerPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         match self.handler.handle(message).await {
-            Ok(()) => Ok(SendOutcome::Ack),
+            Ok(()) => Ok(Sent::Ack),
             Err(e) => Err(e.into()), // Converts HandlerError to PublisherError
         }
     }
@@ -53,7 +53,7 @@ impl MessagePublisher for EventHandlerPublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })

@@ -1,4 +1,4 @@
-use crate::traits::{MessagePublisher, PublisherError, SendBatchOutcome, SendOutcome};
+use crate::traits::{MessagePublisher, PublisherError, Sent, SentBatch};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -16,18 +16,18 @@ impl FanoutPublisher {
 
 #[async_trait]
 impl MessagePublisher for FanoutPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         for publisher in &self.publishers {
             // We must clone the message for each publisher.
             publisher.send(message.clone()).await?;
         }
-        Ok(SendOutcome::Ack)
+        Ok(Sent::Ack)
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         // We use the helper to send messages one by one to ensure reliable fan-out
         // to all configured publishers.
         crate::traits::send_batch_helper(self, messages, |publisher, message| {

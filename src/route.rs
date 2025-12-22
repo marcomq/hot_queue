@@ -3,9 +3,12 @@ use std::sync::Arc;
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
-use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
-use crate::traits::{BatchCommitFunc, ConsumerError, SendBatchOutcome};
+use crate::traits::{BatchCommitFunc, ConsumerError, SentBatch};
+use crate::{
+    endpoints::{create_consumer_from_route, create_publisher_from_route},
+    traits::CommandHandler,
+};
 use async_channel::{bounded, Sender};
 use tokio::{
     select,
@@ -126,10 +129,10 @@ impl Route {
 
                     // Process the batch sequentially without spawning a new task
                     match publisher.send_batch(messages).await {
-                        Ok(SendBatchOutcome::Ack) => {
+                        Ok(SentBatch::Ack) => {
                             commit(None).await;
                         }
-                        Ok(SendBatchOutcome::Partial { responses, failed }) => {
+                        Ok(SentBatch::Partial { responses, failed }) => {
                             let failed_count = failed.len();
                             commit(responses).await; // Commit the successful messages
                             if failed_count > 0 {
@@ -174,10 +177,10 @@ impl Route {
                 while let Ok((messages, commit)) = work_rx_clone.recv().await {
                     // The worker now receives a batch and sends it as a bulk.
                     match publisher.send_batch(messages).await {
-                        Ok(SendBatchOutcome::Ack) => {
+                        Ok(SentBatch::Ack) => {
                             commit(None).await;
                         }
-                        Ok(SendBatchOutcome::Partial { responses, failed }) => {
+                        Ok(SentBatch::Partial { responses, failed }) => {
                             let failed_count = failed.len();
                             commit(responses).await; // Commit the successful messages
                             if failed_count > 0 {
@@ -252,5 +255,10 @@ impl Route {
         }
         // Return true if we should continue (i.e., we were stopped by the running flag), false otherwise.
         Ok(shutdown_rx.is_empty())
+    }
+
+    pub fn with_handler(mut self, handler: Arc<dyn CommandHandler>) -> Self {
+        self.output.handler = Some(handler);
+        self
     }
 }

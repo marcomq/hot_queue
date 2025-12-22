@@ -1,7 +1,7 @@
 use crate::models::KafkaConfig;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
-    ReceivedBatch, SendBatchOutcome, SendOutcome,
+    ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -130,7 +130,7 @@ impl Drop for KafkaPublisher {
 
 #[async_trait]
 impl MessagePublisher for KafkaPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let mut record = FutureRecord::to(&self.topic).payload(&message.payload[..]);
 
         if !message.metadata.is_empty() {
@@ -163,13 +163,13 @@ impl MessagePublisher for KafkaPublisher {
                 .send_result(record)
                 .map_err(|(e, _)| anyhow!("Failed to enqueue Kafka message: {}", e))?;
         }
-        Ok(SendOutcome::Ack)
+        Ok(Sent::Ack)
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })

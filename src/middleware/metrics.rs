@@ -5,7 +5,7 @@
 use crate::models::MetricsMiddleware;
 use crate::traits::{
     ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received, ReceivedBatch,
-    SendBatchOutcome, SendOutcome,
+    Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use async_trait::async_trait;
@@ -35,7 +35,7 @@ impl MetricsPublisher {
 
 #[async_trait]
 impl MessagePublisher for MetricsPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<SendOutcome, PublisherError> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let start = Instant::now();
         let result = self.inner.send(message).await?;
         let duration = start.elapsed();
@@ -48,14 +48,14 @@ impl MessagePublisher for MetricsPublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> Result<SendBatchOutcome, PublisherError> {
+    ) -> Result<SentBatch, PublisherError> {
         let total_count = messages.len();
         let start = Instant::now();
         let result = self.inner.send_batch(messages).await?;
         let duration = start.elapsed();
 
         match &result {
-            SendBatchOutcome::Partial { failed, .. } => {
+            SentBatch::Partial { failed, .. } => {
                 let successful_count = total_count - failed.len();
                 if successful_count > 0 {
                     let avg_duration = duration.as_secs_f64() / successful_count as f64;
@@ -64,7 +64,7 @@ impl MessagePublisher for MetricsPublisher {
                 }
                 // We can add a new metric for failures here if desired
             }
-            SendBatchOutcome::Ack => {
+            SentBatch::Ack => {
                 if total_count > 0 {
                     let avg_duration = duration.as_secs_f64() / total_count as f64;
                     metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(total_count as u64);
