@@ -3,8 +3,10 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::models::DeduplicationMiddleware;
-use crate::traits::{into_batch_commit_func, BatchCommitFunc, CommitFunc, MessageConsumer};
-use crate::CanonicalMessage;
+use crate::traits::{
+    into_batch_commit_func, ConsumerError, MessageConsumer, Received, ReceivedBatch,
+};
+use anyhow::Context;
 use async_trait::async_trait;
 use sled::Db;
 use std::any::Any;
@@ -40,18 +42,23 @@ impl DeduplicationConsumer {
 #[async_trait]
 impl MessageConsumer for DeduplicationConsumer {
     #[instrument(skip_all)]
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         loop {
-            let (message, commit) = self.inner.receive().await?;
+            let received = self.inner.receive().await?;
+            let message = received.message;
+            let commit = received.commit;
             let key = message.message_id.to_be_bytes().to_vec();
 
-            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("System time is before UNIX EPOCH")?
+                .as_secs();
             // Atomically insert only if key doesn't exist
-            match self.db.compare_and_swap(
-                &key,
-                None as Option<&[u8]>,
-                Some(&now.to_be_bytes()[..]),
-            )? {
+            match self
+                .db
+                .compare_and_swap(&key, None as Option<&[u8]>, Some(&now.to_be_bytes()[..]))
+                .context("Failed to perform compare-and-swap in deduplication DB")?
+            {
                 Ok(_) => {
                     // Successfully inserted - not a duplicate, proceed
                 }
@@ -114,17 +121,22 @@ impl MessageConsumer for DeduplicationConsumer {
                 });
             }
 
-            return Ok((message, commit));
+            return Ok(Received { message, commit });
         }
     }
 
+    /// Note: This implementation ignores `_max_messages` and always fetches a single message
+    /// to ensure correct deduplication logic per message.
     async fn receive_batch(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
-        let (msg, commit) = self.receive().await?;
-        let commit = into_batch_commit_func(commit);
-        Ok((vec![msg], commit))
+    ) -> Result<ReceivedBatch, ConsumerError> {
+        let received = self.receive().await?;
+        let commit = into_batch_commit_func(received.commit);
+        Ok(ReceivedBatch {
+            messages: vec![received.message],
+            commit,
+        })
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -137,6 +149,7 @@ mod tests {
     use super::*;
     use crate::endpoints::memory::MemoryConsumer;
     use crate::models::{DeduplicationMiddleware, MemoryConfig};
+    use crate::CanonicalMessage;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -172,13 +185,13 @@ mod tests {
             DeduplicationConsumer::new(Box::new(mem_consumer), &config, "test_route").unwrap();
 
         // First receive: Should be msg1 (ID 100)
-        let (rec1, commit1) = dedup_consumer.receive().await.unwrap();
-        assert_eq!(rec1.message_id, 100);
-        commit1(None).await;
+        let rec1 = dedup_consumer.receive().await.unwrap();
+        assert_eq!(rec1.message.message_id, 100);
+        (rec1.commit)(None).await;
 
         // Second receive: Should be msg3 (ID 101). msg2 (ID 100) is skipped internally.
-        let (rec2, commit2) = dedup_consumer.receive().await.unwrap();
-        assert_eq!(rec2.message_id, 101);
-        commit2(None).await;
+        let rec2 = dedup_consumer.receive().await.unwrap();
+        assert_eq!(rec2.message.message_id, 101);
+        (rec2.commit)(None).await;
     }
 }

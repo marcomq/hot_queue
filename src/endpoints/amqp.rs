@@ -1,8 +1,11 @@
 use crate::models::AmqpConfig;
-use crate::traits::{BatchCommitFunc, BoxFuture, MessageConsumer, MessagePublisher};
+use crate::traits::{
+    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
+    Sent, SentBatch,
+};
 use crate::CanonicalMessage;
 use crate::APP_NAME;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use lapin::tcp::{OwnedIdentity, OwnedTLSConfig};
@@ -60,7 +63,7 @@ impl AmqpPublisher {
 
 #[async_trait]
 impl MessagePublisher for AmqpPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let mut properties = if self.no_persistence {
             BasicProperties::default()
         } else {
@@ -87,20 +90,23 @@ impl MessagePublisher for AmqpPublisher {
                 &message.payload,
                 properties,
             )
-            .await?;
+            .await
+            .context("Failed to publish AMQP message")?;
 
         if !self.delayed_ack {
             // Wait for the broker's publisher confirmation.
-            confirmation.await?;
+            confirmation
+                .await
+                .context("Failed to get AMQP publisher confirmation")?;
         }
-        Ok(None)
+        Ok(Sent::Ack)
     }
 
     // This isn't a real bulk send, but the normal send is fast enough.
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SentBatch, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })
@@ -239,18 +245,19 @@ fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> Canonic
 
 #[async_trait]
 impl MessageConsumer for AmqpConsumer {
-    async fn receive_batch(
-        &mut self,
-        max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         if max_messages == 0 {
-            return Ok((Vec::new(), Box::new(|_| Box::pin(async {}))));
+            return Ok(ReceivedBatch {
+                messages: Vec::new(),
+                commit: Box::new(|_| Box::pin(async {})),
+            });
         }
 
         // 1. Wait for the first message. This will block until a message is available.
         let mut last_delivery = futures::StreamExt::next(&mut self.consumer)
             .await
-            .ok_or_else(|| anyhow!("AMQP consumer stream ended"))??;
+            .ok_or(ConsumerError::EndOfStream)?
+            .context("Failed to get message from AMQP consumer stream")?;
 
         let mut messages = Vec::with_capacity(max_messages);
         messages.push(delivery_to_canonical_message(&last_delivery));
@@ -281,6 +288,7 @@ impl MessageConsumer for AmqpConsumer {
                     ..Default::default()
                 };
                 if let Err(e) = last_delivery.ack(ack_options).await {
+                    // Note: If ack fails, we log the error but cannot signal the caller to retry commit as the signature returns ().
                     tracing::error!(last_delivery_tag = last_delivery.delivery_tag, error = %e, "Failed to bulk-ack AMQP messages");
                 } else {
                     debug!(
@@ -292,7 +300,7 @@ impl MessageConsumer for AmqpConsumer {
             }) as BoxFuture<'static, ()>
         });
 
-        Ok((messages, commit))
+        Ok(ReceivedBatch { messages, commit })
     }
 
     fn as_any(&self) -> &dyn Any {

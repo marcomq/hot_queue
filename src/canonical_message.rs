@@ -26,6 +26,14 @@ impl CanonicalMessage {
         }
     }
 
+    pub fn from_vec(payload: impl Into<Vec<u8>>) -> Self {
+        Self::new(payload.into(), None)
+    }
+
+    pub fn from_str(payload: &str) -> Self {
+        Self::new(payload.as_bytes().into(), None)
+    }
+
     pub fn set_id(&mut self, id: u128) {
         self.message_id = id;
     }
@@ -68,8 +76,36 @@ impl CanonicalMessage {
         serde_json::from_slice(&self.payload)
     }
 
+    /// Returns the payload as a UTF-8 lossy string.
+    pub fn get_payload_str(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.payload)
+    }
+
+    /// Sets the payload of this message to the given string.
+    pub fn set_payload_str(&mut self, payload: impl Into<String>) {
+        self.payload = Bytes::from(payload.into());
+    }
+
     pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {
         self.metadata = metadata;
         self
+    }
+}
+
+impl From<&str> for CanonicalMessage {
+    fn from(s: &str) -> Self {
+        Self::from_str(s)
+    }
+}
+
+impl From<String> for CanonicalMessage {
+    fn from(s: String) -> Self {
+        Self::new(s.into_bytes(), None)
+    }
+}
+
+impl From<Vec<u8>> for CanonicalMessage {
+    fn from(v: Vec<u8>) -> Self {
+        Self::new(v, None)
     }
 }

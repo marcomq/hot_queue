@@ -3,15 +3,16 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::traits::Compute;
 use serde::{
     de::{MapAccess, Visitor},
     Deserialize, Deserializer, Serialize,
 };
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
+use crate::{
+    endpoints::memory::{get_or_create_channel, MemoryChannel},
+    traits::CommandHandler,
+};
 
 /// The top-level configuration is a map of named routes.
 /// The key is the route name (e.g., "kafka_to_nats").
@@ -55,34 +56,8 @@ fn default_multiplier() -> f64 {
     2.0
 }
 
-#[derive(Clone)]
-pub struct ComputeHandler(pub Arc<dyn Compute>);
-
-impl ComputeHandler {
-    pub fn new(compute: impl Compute + 'static) -> Self {
-        Self(Arc::new(compute))
-    }
-}
-
-impl std::fmt::Debug for ComputeHandler {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ComputeHandler")
-    }
-}
-
-impl<'de> Deserialize<'de> for ComputeHandler {
-    fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Err(serde::de::Error::custom(
-            "ComputeHandler cannot be deserialized from config",
-        ))
-    }
-}
-
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
-#[derive(Debug, Serialize, Clone)]
+#[derive(Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     /// (Optional) A list of middlewares to apply to the endpoint.
@@ -92,6 +67,26 @@ pub struct Endpoint {
     /// The specific endpoint implementation, determined by the configuration key (e.g., "kafka", "nats").
     #[serde(flatten)]
     pub endpoint_type: EndpointType,
+
+    #[serde(skip_serializing)]
+    pub handler: Option<Arc<dyn CommandHandler>>,
+}
+
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("middlewares", &self.middlewares)
+            .field("endpoint_type", &self.endpoint_type)
+            .field(
+                "handler",
+                &if self.handler.is_some() {
+                    "Some(<CommandHandler>)"
+                } else {
+                    "None"
+                },
+            )
+            .finish()
+    }
 }
 
 impl<'de> Deserialize<'de> for Endpoint {
@@ -140,6 +135,7 @@ impl<'de> Deserialize<'de> for Endpoint {
                 Ok(Endpoint {
                     middlewares,
                     endpoint_type,
+                    handler: None,
                 })
             }
         }
@@ -153,8 +149,24 @@ impl Endpoint {
         Self {
             middlewares: Vec::new(),
             endpoint_type,
+            handler: None,
         }
     }
+    pub fn new_memory(topic: &str, capacity: usize) -> Self {
+        Self::new(EndpointType::Memory(MemoryConfig {
+            topic: topic.to_string(),
+            capacity: Some(capacity),
+        }))
+    }
+    pub fn add_middleware(mut self, middleware: Middleware) -> Self {
+        self.middlewares.push(middleware);
+        self
+    }
+    ///
+    /// Returns a reference to the in-memory channel associated with this Endpoint.
+    /// This function will only succeed if the Endpoint is of type EndpointType::Memory.
+    /// If the Endpoint is not a memory endpoint, this function will return an error.
+    /// This function is primarily used for testing purposes where a Queue is needed.
     pub fn channel(&self) -> anyhow::Result<MemoryChannel> {
         match &self.endpoint_type {
             EndpointType::Memory(cfg) => Ok(get_or_create_channel(cfg)),
@@ -163,38 +175,26 @@ impl Endpoint {
     }
 }
 
-/// Helper to deserialize middlewares from a generic serde_json::Value.
-/// This logic was extracted from `deserialize_middlewares_from_map_or_seq`
-/// to be reused by the custom `Endpoint` deserializer.
-fn deserialize_middlewares_from_value(value: serde_json::Value) -> Result<Vec<Middleware>, String>
-where
-{
-    match value {
-        // This is the case for YAML, which provides a clean sequence.
-        serde_json::Value::Array(arr) => {
-            serde_json::from_value(serde_json::Value::Array(arr)).map_err(|e| e.to_string())
-        }
-        // This is the case for environment variables, which `config` turns into a map.
-        // It also handles the map format from YAML.
-        // Since we now enforce sequences for YAML, this branch is primarily for env vars.
-        serde_json::Value::Object(obj) => {
-            // The config crate can produce maps with numeric string keys ("0", "1", ...)
-            // from environment variables. We need to sort by these keys to maintain order.
-            let mut middlewares: Vec<_> = obj
+/// Deserialize middlewares from a generic serde_json::Value.
+///
+/// This logic was extracted from `deserialize_middlewares_from_map_or_seq` to be reused by the custom `Endpoint` deserializer.
+fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Result<Vec<Middleware>> {
+    Ok(match value {
+        serde_json::Value::Array(arr) => serde_json::from_value(serde_json::Value::Array(arr))?,
+        serde_json::Value::Object(map) => {
+            let mut middlewares: Vec<_> = map
                 .into_iter()
-                // The map is {"0": ..., "1": ...}, so we sort by the numeric key
-                // to preserve the order defined in the environment variables.
-                .filter_map(|(k, v)| k.parse::<usize>().ok().map(|i| (i, v)))
+                // The config crate can produce maps with numeric string keys ("0", "1", ...)
+                // from environment variables. We need to sort by these keys to maintain order.
+                .filter_map(|(key, value)| key.parse::<usize>().ok().map(|index| (index, value)))
                 .collect();
+            middlewares.sort_by_key(|(index, _)| *index);
 
-            middlewares.sort_by_key(|(k, _)| *k);
-
-            let sorted_values = middlewares.into_iter().map(|(_, v)| v).collect();
-            serde_json::from_value(serde_json::Value::Array(sorted_values))
-                .map_err(|e| e.to_string())
+            let sorted_values = middlewares.into_iter().map(|(_, value)| value).collect();
+            serde_json::from_value(serde_json::Value::Array(sorted_values))?
         }
-        _ => Err("Expected middlewares to be a sequence or a map".to_string()),
-    }
+        _ => return Err(anyhow::anyhow!("Expected an array or object")),
+    })
 }
 
 /// An enumeration of all supported endpoint types.
@@ -224,8 +224,6 @@ pub enum Middleware {
     Dlq(Box<DeadLetterQueueMiddleware>),
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
-    #[serde(skip)]
-    Compute(ComputeHandler),
 }
 
 /// Deduplication middleware configuration.
@@ -565,7 +563,6 @@ kafka_to_nats:
                     assert!((rp.probability - 0.1).abs() < f64::EPSILON);
                     has_random_panic = true;
                 }
-                Middleware::Compute(_) => panic!("Compute middleware cannot be deserialized"),
             }
         }
 
@@ -615,7 +612,10 @@ kafka_to_nats:
         unsafe {
             std::env::set_var("MQB__KAFKA_TO_NATS__CONCURRENCY", "10");
             std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
-            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS", "localhost:9092");
+            std::env::set_var(
+                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS",
+                "localhost:9092",
+            );
             std::env::set_var(
                 "MQB__KAFKA_TO_NATS__INPUT__KAFKA__GROUP_ID",
                 "my-consumer-group",
@@ -629,7 +629,10 @@ kafka_to_nats:
                 "MQB__KAFKA_TO_NATS__INPUT__KAFKA__TLS__ACCEPT_INVALID_CERTS",
                 "true",
             );
-            std::env::set_var("MQB__KAFKA_TO_NATS__OUTPUT__NATS__SUBJECT", "output-subject");
+            std::env::set_var(
+                "MQB__KAFKA_TO_NATS__OUTPUT__NATS__SUBJECT",
+                "output-subject",
+            );
             std::env::set_var(
                 "MQB__KAFKA_TO_NATS__OUTPUT__NATS__URL",
                 "nats://localhost:4222",

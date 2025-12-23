@@ -1,5 +1,5 @@
 use crate::models::RetryMiddleware;
-use crate::traits::MessagePublisher;
+use crate::traits::{MessagePublisher, PublisherError, Sent, SentBatch};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -16,10 +16,10 @@ impl RetryPublisher {
         Self { inner, config }
     }
 
-    async fn retry_op<F, Fut, T>(&self, operation: F) -> anyhow::Result<T>
+    async fn retry_op<F, Fut, T>(&self, operation: F) -> Result<T, PublisherError>
     where
         F: Fn() -> Fut,
-        Fut: std::future::Future<Output = anyhow::Result<T>>,
+        Fut: std::future::Future<Output = Result<T, PublisherError>>,
     {
         let mut attempt = 0;
         let mut interval = self.config.initial_interval_ms;
@@ -28,7 +28,8 @@ impl RetryPublisher {
             attempt += 1;
             match operation().await {
                 Ok(val) => return Ok(val),
-                Err(e) => {
+                Err(e @ PublisherError::NonRetryable(_)) => return Err(e), // Don't retry non-retryable errors
+                Err(e @ PublisherError::Retryable(_)) => {
                     if attempt >= self.config.max_attempts {
                         return Err(e);
                     }
@@ -53,7 +54,7 @@ impl RetryPublisher {
 
 #[async_trait]
 impl MessagePublisher for RetryPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         self.retry_op(|| {
             let msg = message.clone();
             async { self.inner.send(msg).await }
@@ -64,7 +65,7 @@ impl MessagePublisher for RetryPublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SentBatch, PublisherError> {
         let mut current_messages = messages;
         let mut all_responses = Vec::new();
 
@@ -75,15 +76,31 @@ impl MessagePublisher for RetryPublisher {
         loop {
             attempt += 1;
             match self.inner.send_batch(current_messages.clone()).await {
-                Ok((responses, failed)) => {
+                Ok(SentBatch::Ack) => {
+                    return if all_responses.is_empty() {
+                        Ok(SentBatch::Ack)
+                    } else {
+                        Ok(SentBatch::Partial {
+                            responses: Some(all_responses),
+                            failed: Vec::new(),
+                        })
+                    };
+                }
+                Ok(SentBatch::Partial { responses, failed }) => {
                     if let Some(resps) = responses {
                         all_responses.extend(resps);
                     }
                     if failed.is_empty() {
-                        return Ok((Some(all_responses), Vec::new()));
+                        return Ok(SentBatch::Partial {
+                            responses: Some(all_responses),
+                            failed: Vec::new(),
+                        });
                     }
                     if attempt >= self.config.max_attempts {
-                        return Ok((Some(all_responses), failed));
+                        return Ok(SentBatch::Partial {
+                            responses: Some(all_responses),
+                            failed,
+                        });
                     }
                     warn!("Batch send partially failed (attempt {}/{}): {} messages failed. Retrying...", attempt, self.config.max_attempts, failed.len());
                     current_messages = failed;
@@ -125,26 +142,26 @@ mod tests {
 
     #[async_trait]
     impl MessagePublisher for MockPublisher {
-        async fn send(&self, _msg: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+        async fn send(&self, _msg: CanonicalMessage) -> Result<Sent, PublisherError> {
             let mut attempts = self.attempts.lock().unwrap();
             *attempts += 1;
             if *attempts > self.succeed_after {
-                Ok(None)
+                Ok(Sent::Ack)
             } else {
-                Err(anyhow!("Simulated error"))
+                Err(anyhow!("Simulated error").into())
             }
         }
 
         async fn send_batch(
             &self,
             _messages: Vec<CanonicalMessage>,
-        ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+        ) -> Result<SentBatch, PublisherError> {
             let mut attempts = self.attempts.lock().unwrap();
             *attempts += 1;
             if *attempts > self.succeed_after {
-                Ok((None, Vec::new()))
+                Ok(SentBatch::Ack)
             } else {
-                Err(anyhow!("Simulated batch error"))
+                Err(anyhow!("Simulated batch error").into())
             }
         }
 

@@ -16,8 +16,30 @@
 *   **Route**: A named data pipeline that defines a flow from one `input` to one `output`.
 *   **Endpoint**: A source or sink for messages.
 *   **Middleware**: Components that intercept and process messages (e.g., for error handling).
+*   **Handler**: A programmatic component for business logic, such as transforming messages (`CommandHandler`) or consuming them (`EventHandler`).
 
 ## Usage
+
+### Programmatic Handlers
+
+For implementing business logic, `mq-bridge` provides a handler layer that is separate from transport-level middleware. This allows you to process messages programmatically.
+
+*   **`CommandHandler`**: A handler for 1-to-1 or 1-to-0 message transformations. It takes a message and can optionally return a new message to be passed down the publisher chain.
+*   **`EventHandler`**: A terminal handler that consumes a message without returning a new one.
+
+You can chain these handlers with endpoint publishers.
+
+```rust
+use mq_bridge::traits::CommandHandler;
+use std::sync::Arc;
+
+// Define a handler that transforms the message payload
+let command_handler = Arc::new(|mut msg: mq_bridge::CanonicalMessage| async move {
+    let new_payload = format!("handled_{}", String::from_utf8_lossy(&msg.payload));
+    msg.payload = new_payload.into();
+    Ok(mq_bridge::Handled::Publish(msg))
+});
+```
 
 ### Programmatic Usage
 

@@ -1,5 +1,8 @@
 use crate::models::RandomPanicMiddleware;
-use crate::traits::{BatchCommitFunc, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{
+    ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received, ReceivedBatch,
+    Sent, SentBatch,
+};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use rand::Rng;
@@ -33,15 +36,12 @@ impl RandomPanicConsumer {
 
 #[async_trait]
 impl MessageConsumer for RandomPanicConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         self.maybe_panic();
         self.inner.receive().await
     }
 
-    async fn receive_batch(
-        &mut self,
-        max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         self.maybe_panic();
         self.inner.receive_batch(max_messages).await
     }
@@ -79,7 +79,7 @@ impl RandomPanicPublisher {
 
 #[async_trait]
 impl MessagePublisher for RandomPanicPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         self.maybe_panic();
         self.inner.send(message).await
     }
@@ -87,7 +87,7 @@ impl MessagePublisher for RandomPanicPublisher {
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SentBatch, PublisherError> {
         self.maybe_panic();
         self.inner.send_batch(messages).await
     }

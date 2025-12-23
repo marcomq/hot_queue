@@ -1,8 +1,8 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
 use chrono;
-use mq_bridge::traits::{BatchCommitFunc, MessagePublisher};
-use mq_bridge::traits::{CommitFunc, MessageConsumer};
+use mq_bridge::traits::{ConsumerError, MessageConsumer, ReceivedBatch, SentBatch};
+use mq_bridge::traits::{MessagePublisher, Received};
 use mq_bridge::{CanonicalMessage, Route};
 use once_cell::sync::Lazy;
 use serde_json::json;
@@ -59,7 +59,8 @@ impl DockerCompose {
             "Starting docker-compose services from {}...",
             self.compose_file
         );
-        let status = Command::new("docker-compose")
+        let status = Command::new("docker")
+            .arg("compose")
             .arg("-f")
             .arg(&self.compose_file)
             .arg("up")
@@ -68,9 +69,9 @@ impl DockerCompose {
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .status()
-            .expect("Failed to start docker-compose");
+            .expect("Failed to start docker compose");
 
-        assert!(status.success(), "docker-compose up --wait failed");
+        assert!(status.success(), "docker compose up --wait failed");
         println!("Services from {} should be up.", self.compose_file);
     }
 
@@ -79,14 +80,15 @@ impl DockerCompose {
             "Stopping docker-compose services from {}...",
             self.compose_file
         );
-        Command::new("docker-compose")
+        Command::new("docker")
+            .arg("compose")
             .arg("-f")
             .arg(&self.compose_file)
             .arg("down")
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .status()
-            .expect("Failed to stop docker-compose");
+            .expect("Failed to stop docker compose");
         println!("Services from {} stopped.", self.compose_file);
     }
 }
@@ -436,15 +438,24 @@ pub async fn measure_write_performance(
                         .send_batch(std::mem::take(&mut messages_to_send))
                         .await
                     {
-                        Ok((_, failed)) if failed.is_empty() => {
+                        Ok(SentBatch::Ack) => {
                             final_count_clone
                                 .fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
                             break; // All sent successfully
                         }
-                        Ok((_, failed)) => {
-                            messages_to_send = failed;
-                            batch_size = messages_to_send.len();
-                            retry_count = 0; // Reset on partial success
+                        Ok(SentBatch::Partial {
+                            responses: _,
+                            failed,
+                        }) => {
+                            if failed.is_empty() {
+                                final_count_clone
+                                    .fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
+                                break; // All sent successfully
+                            } else {
+                                messages_to_send = failed;
+                                batch_size = messages_to_send.len();
+                                retry_count = 0; // Reset on partial success
+                            }
                         }
                         Err(e) => {
                             eprintln!("Error sending bulk messages: {}", e);
@@ -466,7 +477,10 @@ pub async fn measure_write_performance(
 
     let count = final_count.load(std::sync::atomic::Ordering::Relaxed);
     if count != num_messages {
-        eprintln!("measure_write_performance: Expected {} messages, but got {}", num_messages, count);
+        eprintln!(
+            "measure_write_performance: Expected {} messages, but got {}",
+            num_messages, count
+        );
     }
     debug_assert_eq!(count, num_messages);
     start_time.elapsed()
@@ -478,7 +492,7 @@ pub struct MockConsumer;
 
 #[async_trait::async_trait]
 impl MessageConsumer for MockConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         // This consumer will block forever, which is fine for tests that only need a publisher.
         // It prevents the route from exiting immediately.
         tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -487,7 +501,7 @@ impl MessageConsumer for MockConsumer {
     async fn receive_batch(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    ) -> Result<ReceivedBatch, ConsumerError> {
         // This consumer will block forever, which is fine for tests that only need a publisher.
         // It prevents the route from exiting immediately.
         tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -550,8 +564,9 @@ pub async fn measure_read_performance(
         let receive_future = consumer_guard.receive_batch(missing);
 
         match tokio::time::timeout(Duration::from_secs(5), receive_future).await {
-            Ok(Ok((msgs, commit))) if !msgs.is_empty() => {
-                final_count += msgs.len();
+            Ok(Ok(batch)) if !batch.messages.is_empty() => {
+                final_count += batch.messages.len();
+                let commit = batch.commit;
                 tokio::spawn(async move { commit(None).await });
             }
             Ok(Err(e)) => {
@@ -566,7 +581,10 @@ pub async fn measure_read_performance(
     }
 
     if final_count != num_messages {
-        eprintln!("measure_read_performance: Expected {} messages, but got {}", num_messages, final_count);
+        eprintln!(
+            "measure_read_performance: Expected {} messages, but got {}",
+            num_messages, final_count
+        );
     }
     debug_assert_eq!(final_count, num_messages);
     start_time.elapsed()
@@ -622,7 +640,10 @@ pub async fn measure_single_write_performance(
 
     let count = final_count.load(std::sync::atomic::Ordering::Relaxed);
     if count != num_messages {
-        eprintln!("measure_single_write_performance: Expected {} messages, but got {}", num_messages, count);
+        eprintln!(
+            "measure_single_write_performance: Expected {} messages, but got {}",
+            num_messages, count
+        );
     }
     debug_assert_eq!(count, num_messages);
     start_time.elapsed()
@@ -641,8 +662,10 @@ pub async fn measure_single_read_performance(
         }
         let mut consumer_guard = consumer.lock().await;
         let receive_future = consumer_guard.receive();
-        if let Ok(Ok((_msg, commit))) =
-            tokio::time::timeout(Duration::from_secs(5), receive_future).await
+        if let Ok(Ok(Received {
+            message: _msg,
+            commit,
+        })) = tokio::time::timeout(Duration::from_secs(5), receive_future).await
         {
             final_count += 1;
             tokio::spawn(async move { commit(None).await });
@@ -653,7 +676,10 @@ pub async fn measure_single_read_performance(
     }
 
     if final_count != num_messages {
-        eprintln!("measure_single_read_performance: Expected {} messages, but got {}", num_messages, final_count);
+        eprintln!(
+            "measure_single_read_performance: Expected {} messages, but got {}",
+            num_messages, final_count
+        );
     }
     debug_assert_eq!(final_count, num_messages);
     start_time.elapsed()

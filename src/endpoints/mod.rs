@@ -74,7 +74,7 @@ async fn create_base_consumer(
         EndpointType::File(path) => Ok(Box::new(file::FileConsumer::new(path).await?)),
         #[cfg(feature = "http")]
         EndpointType::Http(cfg) => Ok(Box::new(http::HttpConsumer::new(&cfg.config).await?)),
-        EndpointType::Static(cfg) => { 
+        EndpointType::Static(cfg) => {
             Ok(Box::new(static_endpoint::StaticRequestConsumer::new(cfg)?))
         }
         EndpointType::Memory(cfg) => Ok(Box::new(memory::MemoryConsumer::new(cfg)?)),
@@ -108,9 +108,18 @@ async fn create_publisher_with_depth(
 ) -> Result<Arc<dyn MessagePublisher>> {
     const MAX_DEPTH: usize = 16;
     if depth > MAX_DEPTH {
-        return Err(anyhow!("Fanout recursion depth exceeded limit of {}", MAX_DEPTH));
+        return Err(anyhow!(
+            "Fanout recursion depth exceeded limit of {}",
+            MAX_DEPTH
+        ));
     }
-    let publisher = create_base_publisher(route_name, &endpoint.endpoint_type, depth).await?;
+    let mut publisher = create_base_publisher(route_name, &endpoint.endpoint_type, depth).await?;
+    if let Some(handler) = &endpoint.handler {
+        publisher = Box::new(crate::command_handler::CommandHandlerPublisher::new(
+            publisher,
+            handler.clone(),
+        ));
+    }
     crate::middleware::apply_middlewares_to_publisher(publisher, endpoint, route_name).await
 }
 
@@ -164,8 +173,9 @@ async fn create_base_publisher(
             }
             Ok(Box::new(sink) as Box<dyn MessagePublisher>)
         }
-        EndpointType::Static(cfg) => Ok(
-            Box::new(static_endpoint::StaticEndpointPublisher::new(cfg)?) as Box<dyn MessagePublisher>),
+        EndpointType::Static(cfg) => Ok(Box::new(static_endpoint::StaticEndpointPublisher::new(
+            cfg,
+        )?) as Box<dyn MessagePublisher>),
         EndpointType::Memory(cfg) => {
             Ok(Box::new(memory::MemoryPublisher::new(cfg)?) as Box<dyn MessagePublisher>)
         }
@@ -180,7 +190,8 @@ async fn create_base_publisher(
         EndpointType::Fanout(endpoints) => {
             let mut publishers = Vec::with_capacity(endpoints.len());
             for endpoint in endpoints {
-                let p = Box::pin(create_publisher_with_depth(route_name, endpoint, depth + 1)).await?;
+                let p =
+                    Box::pin(create_publisher_with_depth(route_name, endpoint, depth + 1)).await?;
                 publishers.push(p);
             }
             Ok(Box::new(fanout::FanoutPublisher::new(publishers)) as Box<dyn MessagePublisher>)

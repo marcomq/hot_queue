@@ -1,11 +1,11 @@
 use crate::models::MqttConfig;
 use crate::traits::{
-    into_batch_commit_func, BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer,
-    MessagePublisher,
+    into_batch_commit_func, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher,
+    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};
 use std::sync::Arc;
@@ -63,21 +63,22 @@ impl Drop for MqttPublisher {
 
 #[async_trait]
 impl MessagePublisher for MqttPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         tracing::trace!(
             payload = %String::from_utf8_lossy(&message.payload),
             "Publishing MQTT message"
         );
         self.client
             .publish(&self.topic, self.qos, false, message.payload)
-            .await?;
-        Ok(None)
+            .await
+            .context("Failed to publish MQTT message")?;
+        Ok(Sent::Ack)
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SentBatch, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })
@@ -130,7 +131,7 @@ impl Drop for MqttConsumer {
 
 #[async_trait]
 impl MessageConsumer for MqttConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         let p = self
             .message_rx
             .recv()
@@ -151,16 +152,22 @@ impl MessageConsumer for MqttConsumer {
             }) as BoxFuture<'static, ()>
         });
 
-        Ok((canonical_message, commit))
+        Ok(Received {
+            message: canonical_message,
+            commit,
+        })
     }
 
     async fn receive_batch(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
-        let (msg, commit) = self.receive().await?;
-        let commit = into_batch_commit_func(commit);
-        Ok((vec![msg], commit))
+    ) -> Result<ReceivedBatch, ConsumerError> {
+        let received = self.receive().await?;
+        let commit = into_batch_commit_func(received.commit);
+        Ok(ReceivedBatch {
+            messages: vec![received.message],
+            commit,
+        })
     }
 
     fn as_any(&self) -> &dyn Any {

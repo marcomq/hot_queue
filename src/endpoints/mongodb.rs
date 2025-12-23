@@ -1,5 +1,8 @@
 use crate::models::MongoDbConfig;
-use crate::traits::{BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
+    Received, ReceivedBatch, Sent, SentBatch,
+};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -66,9 +69,10 @@ impl MongoDbPublisher {
 
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
-        let metadata = to_document(&message.metadata)?;
+        let metadata = to_document(&message.metadata)
+            .context("Failed to serialize metadata to BSON document")?;
 
         // Manually construct the document to handle u64 message_id for BSON.
         // BSON only supports i64, so we do a wrapping conversion.
@@ -80,15 +84,18 @@ impl MessagePublisher for MongoDbPublisher {
             "metadata": metadata,
             "locked_until": null
         };
-        self.collection.insert_one(doc).await?;
+        self.collection
+            .insert_one(doc)
+            .await
+            .context("Failed to insert document into MongoDB")?;
 
-        Ok(None)
+        Ok(Sent::Ack)
     }
 
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
-    ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+    ) -> Result<SentBatch, PublisherError> {
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })
@@ -154,7 +161,7 @@ impl MongoDbConsumer {
 
 #[async_trait]
 impl MessageConsumer for MongoDbConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
         loop {
             // This outer loop handles both polling and change stream logic.
             if let Some(stream_mutex) = &self.change_stream {
@@ -162,11 +169,7 @@ impl MessageConsumer for MongoDbConsumer {
                 let mut stream = stream_mutex.lock().await;
                 if let Some(event_result) = stream.next().await {
                     let event = event_result.context("Error reading from change stream")?;
-                    if let Some(id_val) = event
-                        .full_document
-                        .as_ref()
-                        .and_then(|d| d.get("_id"))
-                    {
+                    if let Some(id_val) = event.full_document.as_ref().and_then(|d| d.get("_id")) {
                         // Attempt to claim the specific document from the event.
                         // Retry a few times to handle replication lag/visibility delays.
                         for _ in 0..3 {
@@ -182,7 +185,7 @@ impl MessageConsumer for MongoDbConsumer {
                     }
                     continue; // Go to the next change stream event
                 } else {
-                    return Err(anyhow!("MongoDB change stream ended unexpectedly"));
+                    return Err(anyhow!("MongoDB change stream ended unexpectedly").into());
                 }
             }
 
@@ -197,20 +200,21 @@ impl MessageConsumer for MongoDbConsumer {
         }
     }
 
-    async fn receive_batch(
-        &mut self,
-        max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         loop {
             if self.change_stream.is_some() {
-                let (msg, commit) = self.receive().await?;
-                let commit_batch = Box::new(move |_response| commit(None));
-                return Ok((vec![msg], commit_batch));
+                let received = self.receive().await?;
+                let commit_batch = crate::traits::into_batch_commit_func(received.commit);
+                return Ok(ReceivedBatch {
+                    messages: vec![received.message],
+                    commit: commit_batch,
+                });
             }
 
             // --- Polling Path (Optimized for Batch) ---
             let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)?
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .context("System time is before UNIX EPOCH")?
                 .as_secs() as i64;
             let lock_duration_secs = 60;
             let locked_until = now + lock_duration_secs;
@@ -221,7 +225,8 @@ impl MessageConsumer for MongoDbConsumer {
             if claimed_docs.is_empty() {
                 tokio::time::sleep(self.polling_interval).await;
             } else {
-                return self.process_claimed_documents(claimed_docs);
+                let (messages, commit) = self.process_claimed_documents(claimed_docs)?;
+                return Ok(ReceivedBatch { messages, commit });
             }
         }
     }
@@ -305,10 +310,7 @@ impl MongoDbConsumer {
     /// Atomically finds and locks a document matching the filter.
     /// If the filter is empty, it finds any available document.
     /// If a document is successfully claimed, it returns the message and commit function.
-    async fn try_claim_document(
-        &self,
-        extra_filter: Document,
-    ) -> anyhow::Result<Option<(CanonicalMessage, CommitFunc)>> {
+    async fn try_claim_document(&self, extra_filter: Document) -> anyhow::Result<Option<Received>> {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs() as i64;
@@ -344,7 +346,10 @@ impl MongoDbConsumer {
 
                 let commit = Box::new(move |_response| {
                     Box::pin(async move {
-                        match collection_clone.delete_one(doc! { "_id": id_val.clone() }).await {
+                        match collection_clone
+                            .delete_one(doc! { "_id": id_val.clone() })
+                            .await
+                        {
                             Ok(delete_result) => {
                                 if delete_result.deleted_count == 1 {
                                     tracing::trace!(mongodb_id = %id_val, "MongoDB message acknowledged and deleted");
@@ -359,7 +364,10 @@ impl MongoDbConsumer {
                     }) as BoxFuture<'static, ()>
                 });
 
-                Ok(Some((msg, commit)))
+                Ok(Some(Received {
+                    message: msg,
+                    commit,
+                }))
             }
             Ok(None) => Ok(None), // No document found or claimed
             Err(e) => Err(e.into()),
